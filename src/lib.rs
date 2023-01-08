@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 pub fn add(left: usize, right: usize) -> usize {
     left + right
 }
@@ -101,10 +102,172 @@ impl From<u64> for Instruction {
 #[test]
 fn test_ins() {
     // b700 0000 0000 0000
-    let ins1: u64 = 0x0000_0000_0000_00b7;
+    // let ins1: u64 = 0x0000_0000_0000_00b7;
+    let ins1: Instruction = 0x0000_0000_0000_00b7u64.into();
+    let ins2: Instruction = 0x0000_0000_0000_0095u64.into();
 
-    let ins: Instruction = ins1.into();
-    dbg!(ins);
+    let mut emu = Emu::default();
+    emu.state.regs[0] = 0xfe;
+    emu.instructions.push_back(ins1);
+    emu.instructions.push_back(ins2);
+    dbg!("before", &emu);
+    emu.run();
+    dbg!("after", &emu);
+}
+
+#[derive(Debug)]
+struct State {
+    regs: [u64; 10],
+}
+
+#[derive(Debug)]
+struct Emu {
+    state: State,
+    ins_count: u32,
+    instructions: VecDeque<Instruction>,
+}
+
+impl Default for Emu {
+    fn default() -> Self {
+        Self {
+            state: State { regs: [0; 10] },
+            instructions: VecDeque::new(),
+            ins_count: 0,
+        }
+    }
+}
+
+impl Emu {
+    fn init(&mut self, r1: usize) {
+        self.state.regs[1] = r1 as u64;
+    }
+    fn step(&mut self) -> Option<()> {
+        if let Some(ins) = self.instructions.pop_front() {
+            println!("{}: {:?}", self.ins_count, ins);
+            match &ins.code {
+                Code::AJ(ajcode) => {
+                    let src = match &ajcode.source {
+                        IMM => ins.imm as u64,
+                        SRC => self.state.regs[ins.src as u8 as usize],
+                    };
+                    match &ajcode.class {
+                        Class::ALU | Class::ALU64 => {
+                            let mut dst = match &ajcode.class {
+                                Class::ALU => {
+                                    let mut dst = &mut self.state.regs[ins.dst as u8 as usize];
+                                    (*dst) &= 0x0000_0000_ffff_ffff;
+                                    dst
+                                }
+                                Class::ALU64 => &mut self.state.regs[ins.dst as u8 as usize],
+                                _ => unreachable!(),
+                            };
+                            let aop = (ajcode.op).into();
+                            match aop {
+                                AOp::ADD => {
+                                    // do we need wrapping_add ?
+                                    (*dst) += src;
+                                }
+                                AOp::SUB => {
+                                    (*dst) -= src;
+                                }
+                                AOp::MUL => {
+                                    (*dst) *= src;
+                                }
+                                AOp::DIV => {
+                                    (*dst) /= src;
+                                }
+                                AOp::OR => {
+                                    (*dst) |= src;
+                                }
+                                AOp::AND => {
+                                    (*dst) &= src;
+                                }
+                                AOp::LSH => {
+                                    (*dst) <<= src;
+                                }
+                                AOp::RSH => {
+                                    (*dst) >>= src;
+                                }
+                                AOp::NEG => {
+                                    // TODO
+                                    // self.state.regs[ins.dst as u8 as usize] = src;
+                                }
+                                AOp::MOD => {
+                                    (*dst) %= src;
+                                }
+                                AOp::XOR => {
+                                    (*dst) ^= src;
+                                }
+                                AOp::MOV => {
+                                    (*dst) = src;
+                                }
+                                AOp::ARSH => {
+                                    // TODO dst >>= imm (arithmetic)
+                                    (*dst) >>= src;
+                                }
+                                // AOp::END => {
+                                //     self.state.regs[ins.dst as u8 as usize] ^= src;
+                                //     (*dst) += src;
+                                // },
+                                _ => {
+                                    unimplemented!();
+                                }
+                            }
+                            println!("{:?} dst, {:?}", aop, &ajcode.source);
+                        }
+                        Class::JMP | Class::JMP32 => match (ajcode.op).into() {
+                            JOp::EXIT => {
+                                println!("exit");
+                            }
+                            _ => {
+                                unimplemented!();
+                            }
+                        },
+                        _ => {
+                            unimplemented!();
+                        }
+                    }
+                }
+                Code::LS(lscode) => {}
+            }
+            self.ins_count += 1;
+            return Some(());
+        } else {
+            println!("=== step to end ===");
+            return None;
+        }
+    }
+    fn run(&mut self) {
+        loop {
+            if self.step().is_none() {
+                break;
+            }
+        }
+    }
+    fn run1(&mut self) {
+        for ins in &self.instructions {
+            println!("execute ins: {:?}", ins);
+            match &ins.code {
+                Code::AJ(ajcode) => match &ajcode.class {
+                    ALU64 => match &ajcode.op {
+                        MOV => match &ajcode.source {
+                            IMM => {
+                                println!("mov dst, imm");
+                                self.state.regs[ins.dst as u8 as usize] = ins.imm as u64;
+                            }
+                            SRC => {
+                                println!("mov dst, src");
+                                self.state.regs[ins.dst as u8 as usize] =
+                                    self.state.regs[ins.src as u8 as usize];
+                            }
+                        },
+                    },
+                },
+                Code::LS(lscode) => {}
+            }
+            break;
+        }
+    }
 }
 
 // For arithmetic and jump, 8-bit 'code' field is divided into three parts:
@@ -145,7 +308,7 @@ impl From<u8> for Code {
 
 #[derive(Debug)]
 struct AJcode {
-    op: Op,         // 4bits
+    op: u8,         // 4bits
     source: Source, // 1bits
     class: Class,   // 3bits
 }
@@ -172,7 +335,7 @@ impl From<u8> for Source {
 }
 #[derive(Debug)]
 #[repr(u8)]
-enum Op {
+enum AOp {
     ADD = 0,
     SUB,
     MUL,
@@ -189,10 +352,35 @@ enum Op {
     END,
 }
 
-impl From<u8> for Op {
+#[derive(Debug)]
+#[repr(u8)]
+enum JOp {
+    JA = 0,
+    JEQ,
+    JGT,
+    JGE,
+    JSET,
+    JNE,
+    JSGT,
+    JSGE,
+    CALL,
+    EXIT,
+    JLT,
+    JLE,
+    JSLT,
+    JSLE,
+}
+
+impl From<u8> for AOp {
     fn from(val: u8) -> Self {
         assert!(val <= 0xd);
-        unsafe { core::ptr::read_unaligned(&(val as u8) as *const u8 as *const Op) }
+        unsafe { core::ptr::read_unaligned(&(val as u8) as *const u8 as *const AOp) }
+    }
+}
+impl From<u8> for JOp {
+    fn from(val: u8) -> Self {
+        assert!(val <= 0xd);
+        unsafe { core::ptr::read_unaligned(&(val as u8) as *const u8 as *const JOp) }
     }
 }
 #[derive(Debug)]
@@ -218,7 +406,7 @@ impl From<u8> for Class {
 impl From<u8> for AJcode {
     fn from(code: u8) -> Self {
         AJcode {
-            op: (code >> 4).into(),
+            op: code >> 4,
             source: ((code >> 3) & 0b1).into(),
             class: (code & 0b111).into(),
         }
