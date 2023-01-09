@@ -11,12 +11,13 @@ enum xdp_action {
     XDP_REDIRECT,
 }
 
+#[derive(Debug)]
 #[repr(C)]
 struct xdp_md {
-    // u32 data,
-    // u32 data_end,
-    // u32 data_meta,
-    // /* Below access go through struct xdp_rxq_info */
+    data: u32,
+    data_end: u32,
+    // data_meta: u32,
+    // Below access go through struct xdp_rxq_info
     // u32 ingress_ifindex, /* rxq->dev->ifindex */
     // u32 rx_queue_index,  /* rxq->queue_index  */
     // u32 egress_ifindex,  /* txq->dev->ifindex */
@@ -157,12 +158,33 @@ fn test_udp() {
     ]
     .map(|x| u64::from_be(x).into());
     let mut emu = Emu::default();
-    emu.state.regs[0] = 0xfe;
+    emu.state.regs[0] = 0x00;
+    use std::ffi::CString;
+    // tcp =>443
+    let dns_pkg = b"\x08\x00\x27\x8d\xc0\x4d\x52\x54\x00\x12\x35\x02\x08\x00\x45\x00\x05\xd4\xf8\xd6\x00\x00\x40\x06\xbd\x0a\x6e\xf2\x44\x42\x0a\x00\x02\x0f\x01\xbb\xb2\x88\xf4\xe2\xb2\x02\xfb\x39\xeb\xc5\x50\x18\xff\xff\xbc\x54\x00\x00";
+    let mut mmu = Mmu {
+        memory: dns_pkg.to_vec(),
+    };
+    dbg!(&dns_pkg.len());
+    // let data_start = dns_pkg.as_ptr() as *const u8 as u64;
+    // println!("data_start: 0x{:x}", data_start);
+    let mut ctx = xdp_md {
+        data: 0,
+        data_end: mmu.memory.len() as u32 - 1,
+    };
+    println!("ctx: 0x{:x}, 0x{:x}", &ctx.data, &ctx.data_end);
+    unsafe {
+        println!(
+            "ctx data+2: 0x{:x}",
+            mmu.read::<u8>(ctx.data_end as usize - 2)
+        );
+    }
+    emu.state.regs[1] = &ctx as *const xdp_md as u64;
     emu.instructions = ins_list.to_vec();
     // println!("{:x}", raw_ins_list[0]);
-    dbg!("before", &emu);
-    emu.run();
-    dbg!("after", &emu);
+    // dbg!("before", &emu);
+    // emu.run();
+    // dbg!("after", &emu);
 }
 #[test]
 fn test_jmp() {
@@ -215,8 +237,24 @@ fn test_ins() {
 }
 
 #[derive(Debug)]
+struct Mmu {
+    memory: Vec<u8>,
+}
+
+impl Mmu {
+    fn write(&mut self, addr: usize, val: &[u8]) {
+        self.memory[addr..addr + val.len()].copy_from_slice(val)
+    }
+    fn read<T>(&mut self, addr: usize) -> T {
+        let ptr = self.memory[addr..addr + core::mem::size_of::<T>()].as_ptr() as *const T;
+        unsafe { ptr.read_unaligned() }
+    }
+}
+
+#[derive(Debug)]
 struct State {
     regs: [u64; 11],
+    mmu: Mmu,
 }
 
 #[derive(Debug)]
@@ -231,7 +269,10 @@ impl Default for Emu {
     fn default() -> Self {
         Self {
             pc: 0,
-            state: State { regs: [0; 11] },
+            state: State {
+                regs: [0; 11],
+                mmu: Mmu { memory: vec![] },
+            },
             instructions: Vec::new(),
             ins_count: 0,
         }
@@ -244,8 +285,8 @@ impl Emu {
     }
     fn step(&mut self) -> Option<()> {
         if let Some(ins) = self.instructions.get(self.pc as usize) {
-            self.pc += 1;
             println!("{}: {:?}", self.pc, ins);
+            self.pc += 1;
             match &ins.code {
                 Code::AJ(ajcode) => {
                     let src = match &ajcode.source {
