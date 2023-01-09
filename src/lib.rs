@@ -78,10 +78,10 @@ impl From<u8> for Register {
 //     16 bit offset
 //     32 bit immediate (imm)
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Instruction {
-    imm: u32,      // 32-bits
-    off: u16,      // 16-bits
+    imm: i32,      // 32-bits
+    off: i16,      // 16-bits
     src: Register, // 4-bits
     dst: Register, // 4-bits
     code: Code,    // 8-bits
@@ -90,8 +90,8 @@ struct Instruction {
 impl From<u64> for Instruction {
     fn from(ins: u64) -> Self {
         Self {
-            imm: (ins >> 32) as u32,
-            off: ((ins >> 16) & 0xffff) as u16,
+            imm: (ins >> 32) as i32,
+            off: ((ins >> 16) & 0xffff) as i16,
             src: (((ins >> 12) & 0xf) as u8).into(),
             dst: (((ins >> 8) & 0xf) as u8).into(),
             code: ((ins & 0xff) as u8).into(),
@@ -99,17 +99,116 @@ impl From<u64> for Instruction {
     }
 }
 
+// Disassembly of section xdp/github_hosts:
+// 0000000000000000 <github_hosts>:
+//        0:	b7 00 00 00 00 00 00 00	r0 = 0
+//        1:	61 12 04 00 00 00 00 00	r2 = *(u32 *)(r1 + 4)
+//        2:	61 11 00 00 00 00 00 00	r1 = *(u32 *)(r1 + 0)
+//        3:	bf 13 00 00 00 00 00 00	r3 = r1
+//        4:	07 03 00 00 0e 00 00 00	r3 += 14
+//        5:	2d 23 11 00 00 00 00 00	if r3 > r2 goto +17 <LBB0_7>
+//        6:	b7 00 00 00 01 00 00 00	r0 = 1
+//        7:	69 14 0c 00 00 00 00 00	r4 = *(u16 *)(r1 + 12)
+//        8:	55 04 0e 00 08 00 00 00	if r4 != 8 goto +14 <LBB0_7>
+//        9:	bf 14 00 00 00 00 00 00	r4 = r1
+//       10:	07 04 00 00 22 00 00 00	r4 += 34
+//       11:	b7 00 00 00 00 00 00 00	r0 = 0
+//       12:	2d 24 0a 00 00 00 00 00	if r4 > r2 goto +10 <LBB0_7>
+//       13:	b7 00 00 00 02 00 00 00	r0 = 2
+//       14:	71 33 09 00 00 00 00 00	r3 = *(u8 *)(r3 + 9)
+//       15:	55 03 07 00 11 00 00 00	if r3 != 17 goto +7 <LBB0_7>
+//       16:	07 01 00 00 2a 00 00 00	r1 += 42
+//       17:	b7 00 00 00 00 00 00 00	r0 = 0
+//       18:	2d 21 04 00 00 00 00 00	if r1 > r2 goto +4 <LBB0_7>
+//       19:	69 41 02 00 00 00 00 00	r1 = *(u16 *)(r4 + 2)
+//       20:	b7 00 00 00 01 00 00 00	r0 = 1
+//       21:	15 01 01 00 04 d2 00 00	if r1 == 53764 goto +1 <LBB0_7>
+//       22:	b7 00 00 00 02 00 00 00	r0 = 2
+
+// 00000000000000b8 <LBB0_7>:
+//       23:	95 00 00 00 00 00 00 00	exit
+#[test]
+fn test_udp() {
+    let ins_list = [
+        0xb7000000_00000000, // r0 = 0
+        0x61120400_00000000, // r2 = *(u32 *)(r1 + 4)
+        0x61110000_00000000, // r1 = *(u32 *)(r1 + 0)
+        0xbf130000_00000000, // r3 = r1
+        0x07030000_0e000000, // r3 += 14
+        0x2d231100_00000000, // if r3 > r2 goto +17 <LBB0_7>
+        0xb7000000_01000000, // r0 = 1
+        0x69140c00_00000000, // r4 = *(u16 *)(r1 + 12)
+        0x55040e00_08000000, // if r4 != 8 goto +14 <LBB0_7>
+        0xbf140000_00000000, // r4 = r1
+        0x07040000_22000000, // r4 += 34
+        0xb7000000_00000000, // r0 = 0
+        0x2d240a00_00000000, // if r4 > r2 goto +10 <LBB0_7>
+        0xb7000000_02000000, // r0 = 2
+        0x71330900_00000000, // r3 = *(u8 *)(r3 + 9)
+        0x55030700_11000000, // if r3 != 17 goto +7 <LBB0_7>
+        0x07010000_2a000000, // r1 += 42
+        0xb7000000_00000000, // r0 = 0
+        0x2d210400_00000000, // if r1 > r2 goto +4 <LBB0_7>
+        0x69410200_00000000, // r1 = *(u16 *)(r4 + 2)
+        0xb7000000_01000000, // r0 = 1
+        0x15010100_04d20000, // if r1 == 53764 goto +1 <LBB0_7>
+        0xb7000000_02000000, // r0 = 2
+        0x95000000_00000000, //	exit
+    ]
+    .map(|x| u64::from_be(x).into());
+    let mut emu = Emu::default();
+    emu.state.regs[0] = 0xfe;
+    emu.instructions = ins_list.to_vec();
+    // println!("{:x}", raw_ins_list[0]);
+    dbg!("before", &emu);
+    emu.run();
+    dbg!("after", &emu);
+}
+#[test]
+fn test_jmp() {
+    // 2d 23 01 00 00 00 00 00 if r3 > r2 goto +1 <LBB0_95>
+    let ins1: Instruction = 0x0000_0000_0001_232du64.into();
+    // 85 00 00 00 19 00 00 00 call 25
+    let ins2: Instruction = 0x0000_0019_0000_0085u64.into();
+    // 05 00 02 00 00 00 00 00 goto +2
+    let ins3: Instruction = 0x0000_0000_0002_0005u64.into();
+    // c7 02 00 00 20 00 00 00  r2 s>>= 32
+    let ins4: Instruction = 0x0000_0020_0000_02c7u64.into();
+    let mut emu = Emu::default();
+    emu.state.regs[0] = 0xfe;
+    // emu.instructions.push(ins1);
+    // emu.instructions.push(ins2);
+    // emu.instructions.push(ins3);
+    emu.instructions.push(ins4);
+    dbg!("before", &emu);
+    emu.run();
+    dbg!("after", &emu);
+}
 #[test]
 fn test_ins() {
     // b700 0000 0000 0000
     // let ins1: u64 = 0x0000_0000_0000_00b7;
     let ins1: Instruction = 0x0000_0000_0000_00b7u64.into();
     let ins2: Instruction = 0x0000_0000_0000_0095u64.into();
+    // r0 = *(u8 *)(r0 + 0)
+    let ins3: Instruction = 0x0000_0000_0000_0071u64.into();
+    // *(u8 *)(r5 + 0) = r2
+    let ins4: Instruction = 0x0000_0000_0000_2573u64.into();
+    // 73 74 0f 00 00 00 00 00 *(u8 *)(r4 + 15) = r7
+    // 63 7a fc fe 00 00 00 00 *(u32 *)(r10 - 260) = r7
+    let ins5: Instruction = 0x0000_0000_fefc_7a63u64.into();
+
+    // 77 02 00 00 18 00 00 00 r2 >>= 24
+    let ins6: Instruction = 0x0000_0018_0000_0277u64.into();
 
     let mut emu = Emu::default();
     emu.state.regs[0] = 0xfe;
-    emu.instructions.push_back(ins1);
-    emu.instructions.push_back(ins2);
+    emu.instructions.push(ins1);
+    emu.instructions.push(ins2);
+    emu.instructions.push(ins3);
+    emu.instructions.push(ins4);
+    emu.instructions.push(ins5);
+    emu.instructions.push(ins6);
     dbg!("before", &emu);
     emu.run();
     dbg!("after", &emu);
@@ -117,21 +216,23 @@ fn test_ins() {
 
 #[derive(Debug)]
 struct State {
-    regs: [u64; 10],
+    regs: [u64; 11],
 }
 
 #[derive(Debug)]
 struct Emu {
     state: State,
     ins_count: u32,
-    instructions: VecDeque<Instruction>,
+    pc: u32,
+    instructions: Vec<Instruction>,
 }
 
 impl Default for Emu {
     fn default() -> Self {
         Self {
-            state: State { regs: [0; 10] },
-            instructions: VecDeque::new(),
+            pc: 0,
+            state: State { regs: [0; 11] },
+            instructions: Vec::new(),
             ins_count: 0,
         }
     }
@@ -142,8 +243,9 @@ impl Emu {
         self.state.regs[1] = r1 as u64;
     }
     fn step(&mut self) -> Option<()> {
-        if let Some(ins) = self.instructions.pop_front() {
-            println!("{}: {:?}", self.ins_count, ins);
+        if let Some(ins) = self.instructions.get(self.pc as usize) {
+            self.pc += 1;
+            println!("{}: {:?}", self.pc, ins);
             match &ins.code {
                 Code::AJ(ajcode) => {
                     let src = match &ajcode.source {
@@ -203,32 +305,225 @@ impl Emu {
                                 }
                                 AOp::ARSH => {
                                     // TODO dst >>= imm (arithmetic)
-                                    (*dst) >>= src;
+                                    // (*dst) >>= src;
+                                    unsafe { *(dst as *mut u64 as *mut i64) >>= src };
                                 }
-                                // AOp::END => {
-                                //     self.state.regs[ins.dst as u8 as usize] ^= src;
-                                //     (*dst) += src;
-                                // },
+                                // Byteswap instructions class=CLASS_ALU op=BPF_END
+                                // 0xd4 0b1101_0100 (imm=16) le16 dst : dst = htole16(dst)
+                                // 0xd4 0b1101_0100 (imm=32) le32 dst
+                                // 0xdc 0b1101_1100 (imm=16) be16 dst
+                                AOp::END => {
+                                    // TODO
+                                    match ins.imm {
+                                        16 => {
+                                            match &ajcode.source {
+                                                IMM => (*dst) = u16::to_le(*dst as u16) as u64,
+                                                SRC => (*dst) = u16::to_be(*dst as u16) as u64,
+                                            };
+                                        }
+                                        32 => {
+                                            match &ajcode.source {
+                                                IMM => (*dst) = u32::to_le(*dst as u32) as u64,
+                                                SRC => (*dst) = u32::to_be(*dst as u32) as u64,
+                                            };
+                                        }
+                                        _ => {
+                                            unreachable!();
+                                        }
+                                    }
+                                }
                                 _ => {
                                     unimplemented!();
                                 }
                             }
                             println!("{:?} dst, {:?}", aop, &ajcode.source);
                         }
-                        Class::JMP | Class::JMP32 => match (ajcode.op).into() {
-                            JOp::EXIT => {
-                                println!("exit");
+                        Class::JMP | Class::JMP32 => {
+                            let off = ins.off as u32;
+                            let mut dst = self.state.regs[ins.dst as u8 as usize];
+
+                            let jop = (ajcode.op).into();
+                            println!("{:?} dst, {:?}, +off", jop, &ajcode.source);
+                            match jop {
+                                JOp::JA => {
+                                    //self.pc += off;
+                                }
+                                JOp::JEQ => {
+                                    // println!("jeq dst, imm, +off");
+                                    if dst == src {
+                                        //   self.pc += off;
+                                    }
+                                }
+                                JOp::JGT => {
+                                    if dst > src {
+                                        //self.pc += off;
+                                    }
+                                }
+                                JOp::JGE => {
+                                    if dst >= src {
+                                        //self.pc += off;
+                                    }
+                                }
+                                JOp::JSET => {
+                                    // TODO
+                                    if (dst & src) != 0 {
+                                        //self.pc += off;
+                                    }
+                                }
+                                JOp::JNE => {
+                                    if dst != src {
+                                        //self.pc += off;
+                                    }
+                                }
+                                JOp::JSGT => {
+                                    // TODO: dst > imm (signed)
+                                    if dst > src {
+                                        // self.pc += off;
+                                    }
+                                }
+                                JOp::JSGE => {}
+                                JOp::CALL => {
+                                    // TODO: function call
+                                    //self.pc = 0;
+                                    // self.state.register[]
+                                }
+                                JOp::EXIT => {
+                                    // self.state.register[0]
+                                }
+                                JOp::JLT => {
+                                    if dst < src {
+                                        //   self.pc += off;
+                                    }
+                                }
+                                JOp::JLE => {
+                                    if dst <= src {
+                                        //  self.pc += off;
+                                    }
+                                }
+                                JOp::JSLT => {}
+                                JOp::JSLE => {}
                             }
-                            _ => {
-                                unimplemented!();
-                            }
-                        },
+                        }
                         _ => {
                             unimplemented!();
                         }
                     }
                 }
-                Code::LS(lscode) => {}
+                Code::LS(lscode) => {
+                    let mode = lscode.mode;
+                    let w = match lscode.size {
+                        // W
+                        0x00 => 0xffff,
+                        // H
+                        0x08 => 0xff,
+                        // B
+                        0x10 => 0xf,
+                        // DW
+                        0x18 => 0xffff_ffff,
+                        _ => unreachable!(),
+                    };
+                    let size_sign = match lscode.size {
+                        // W
+                        0x00 => "W",
+                        // H
+                        0x08 => "H",
+                        // B
+                        0x10 => "B",
+                        // DW
+                        0x18 => "DW",
+                        _ => unreachable!(),
+                    };
+                    // let class = lscode.class;
+                    let imm = ins.imm as u64;
+                    let src = self.state.regs[ins.src as u8 as usize];
+                    let mut dst = &mut self.state.regs[ins.dst as u8 as usize];
+
+                    println!(
+                        "{:?}[{}] dst, [{:?} +off]",
+                        &lscode.class, size_sign, &ins.src
+                    );
+                    match &lscode.class {
+                        Class::LD | Class::LDX => {
+                            // dst_reg = *(size *) ((imm32 | src_reg) + off)
+                            match mode {
+                                MODE_IMM => {
+                                    // BPF_LD | BPF_DW | BPF_IMM
+                                    assert!(w == 0xffff_ffff);
+                                    (*dst) = imm & w;
+                                }
+                                MODE_ABS | MODE_IND => {
+                                    // ABS: legacy BPF packet access (absolute)
+                                    // IDN: legacy BPF packet access (indirect)
+                                    // (deprecated)
+                                    unreachable!();
+                                }
+                                MODE_MEM => {
+                                    assert!(lscode.class == Class::LDX);
+                                    // regular load and store operations
+                                    // dst_reg = *(size *) (src_reg + off)
+                                    (*dst) = (src + imm) & w
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        Class::ST | Class::STX => {
+                            // *(size *) (dst_reg + off) = (imm32 | src_reg)
+                            let source = match &lscode.class {
+                                Class::ST => imm,
+                                Class::STX => src,
+                                _ => unreachable!(),
+                            };
+                            match mode {
+                                MODE_MEM => {
+                                    // regular load and store operations
+                                    // *(size *) (dst_reg + off) = src_reg
+                                    match lscode.size {
+                                        // W u32
+                                        0x00 => unsafe {
+                                            *(dst as *mut u64 as *mut u32).offset(imm as isize) =
+                                                source as u32
+                                        },
+                                        // H u16
+                                        0x08 => unsafe {
+                                            *(dst as *mut u64 as *mut u16).offset(imm as isize) =
+                                                source as u16
+                                        },
+                                        // B u8
+                                        0x10 => unsafe {
+                                            *(dst as *mut u64 as *mut u8).offset(imm as isize) =
+                                                source as u8
+                                        },
+                                        // DW u64
+                                        0x18 => unsafe {
+                                            *(dst as *mut u64 as *mut u64).offset(imm as isize) =
+                                                source as u64
+                                        },
+                                        _ => unreachable!(),
+                                    };
+                                }
+                                MODE_ATOMIC => {
+                                    todo!();
+                                    // STX only
+                                    // atomic operations
+                                    // imm use to encode atomic operations
+                                    match imm {
+                                        ATOMIC_ADD => {
+                                            // (*dst.offset(off)) += src;
+                                        }
+                                        ATOMIC_OR => {}
+                                        ATOMIC_AND => {}
+                                        ATOMIC_XOR => {}
+                                        ATOMIC_FETCH => {}
+                                        ATOMIC_XCHG => {}
+                                        ATOMIC_CMPXCHG => {}
+                                    };
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        _ => todo!(),
+                    }
+                }
             }
             self.ins_count += 1;
             return Some(());
@@ -287,7 +582,7 @@ impl Emu {
 //   +--------+--------+-------------------+
 //   (MSB)                             (LSB)
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Code {
     AJ(AJcode), // arithmetic and jump: ALU/ALU64/JMP
     LS(LScode), // load and store:  LD/LDX/ST/STX
@@ -306,21 +601,27 @@ impl From<u8> for Code {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct AJcode {
     op: u8,         // 4bits
     source: Source, // 1bits
     class: Class,   // 3bits
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct LScode {
     mode: u8,     // 3bits
     size: u8,     // 2bits
     class: Class, // 3bits
 }
 
-#[derive(Debug)]
+const MODE_IMM: u8 = 0x00;
+const MODE_ABS: u8 = 0x20;
+const MODE_IND: u8 = 0x40;
+const MODE_MEM: u8 = 0x60;
+const MODE_ATOMIC: u8 = 0xc0;
+
+#[derive(Debug, Clone)]
 #[repr(u8)]
 enum Source {
     IMM = 0,
@@ -383,7 +684,7 @@ impl From<u8> for JOp {
         unsafe { core::ptr::read_unaligned(&(val as u8) as *const u8 as *const JOp) }
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[repr(u8)]
 enum Class {
     LD = 0,
@@ -416,8 +717,10 @@ impl From<u8> for AJcode {
 impl From<u8> for LScode {
     fn from(code: u8) -> Self {
         LScode {
-            mode: code >> 5,
-            size: (code >> 3) & 0b11,
+            //mode: code >> 5,
+            mode: code & 0b1110_0000,
+            //size: (code >> 3) & 0b11,
+            size: code & 0b0001_1000,
             class: (code & 0b111).into(),
         }
     }
@@ -509,6 +812,7 @@ const OP_JSLE: u8 = 0xd0; /* eBPF only: signed '<=' */
 
 /// class=BPF_LDX
 // 0x61 0b0110_0001 ldxw dst, [src+off]
+// 0x71 0b0111_0001 ldxb dst, [src+off]
 
 // size占2个bits
 const SIZE_W: u8 = 0x00; // 0_0 word        4-bytes
@@ -517,14 +821,20 @@ const SIZE_B: u8 = 0x10; // 1_0 byte        1-bytes
 const SIZE_DW: u8 = 0x18; // 1_1 double-word 8-bytes
 
 // mode占3个bits
-const MODE_IMM: u8 = 0x00; // 000?_ used for 32-bit mov in classic BPF and 64-bit in eBPF
-const MODE_ABS: u8 = 0x20; // 001?_
-const MODE_IND: u8 = 0x40; // 010?_
-const MODE_MEM: u8 = 0x60; // 011?_
-const MODE_LEN: u8 = 0x80; // 100?_ classic BPF only, reserved in eBPF
-const MODE_MSH: u8 = 0xa0; /* classic BPF only, reserved in eBPF */
-const MODE_XADD: u8 = 0xc0; /* eBPF only, exclusive add */
+// constant
+// const MODE_IMM: u8 = 0x00; // 000?_ used for 32-bit mov in classic BPF and 64-bit in eBPF
+// packet data  at a fixed offset
+// legacy BPF packet access (absolute)
+// const MODE_ABS: u8 = 0x20; // 001?_
+// packet data at a variable offset
+// const MODE_IND: u8 = 0x40; // 010?_
+// a word in the scratch memory store
+// const MODE_MEM: u8 = 0x60; // 011?_
+// the packet length
+// const MODE_LEN: u8 = 0x80; // 100?_ classic BPF only, reserved in eBPF
 
+// const MODE_MSH: u8 = 0xa0; /* classic BPF only, reserved in eBPF */
+// const MODE_XADD: u8 = 0xc0; /* eBPF only, exclusive add */
 // #[cfg(test)]
 // mod tests {
 //     use super::*;
