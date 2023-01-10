@@ -2,13 +2,21 @@ use std::collections::VecDeque;
 pub fn add(left: usize, right: usize) -> usize {
     left + right
 }
-#[repr(C)]
+// #[repr(C)]
+#[derive(Debug)]
+#[repr(u8)]
 enum xdp_action {
     XDP_ABORTED = 0,
     XDP_DROP,
     XDP_PASS,
     XDP_TX,
     XDP_REDIRECT,
+}
+impl From<u8> for xdp_action {
+    fn from(val: u8) -> Self {
+        assert!(val < 5);
+        unsafe { core::ptr::read_unaligned(&(val as u8) as *const u8 as *const xdp_action) }
+    }
 }
 
 #[derive(Debug)]
@@ -130,6 +138,8 @@ impl From<u64> for Instruction {
 //       23:	95 00 00 00 00 00 00 00	exit
 #[test]
 fn test_udp() {
+    // udp dst=0x04d2 04|210
+    // '0xd204' 210|04
     let ins_list = [
         0xb7000000_00000000, // r0 = 0
         0x61120400_00000000, // r2 = *(u32 *)(r1 + 4)
@@ -161,11 +171,14 @@ fn test_udp() {
     emu.state.regs[0] = 0x00;
     use std::ffi::CString;
     // tcp =>443
-    let dns_pkg = b"\x08\x00\x27\x8d\xc0\x4d\x52\x54\x00\x12\x35\x02\x08\x00\x45\x00\x05\xd4\xf8\xd6\x00\x00\x40\x06\xbd\x0a\x6e\xf2\x44\x42\x0a\x00\x02\x0f\x01\xbb\xb2\x88\xf4\xe2\xb2\x02\xfb\x39\xeb\xc5\x50\x18\xff\xff\xbc\x54\x00\x00";
+    let tcp_443_pkg = b"\x08\x00\x27\x8d\xc0\x4d\x52\x54\x00\x12\x35\x02\x08\x00\x45\x00\x05\xd4\xf8\xd6\x00\x00\x40\x06\xbd\x0a\x6e\xf2\x44\x42\x0a\x00\x02\x0f\x01\xbb\xb2\x88\xf4\xe2\xb2\x02\xfb\x39\xeb\xc5\x50\x18\xff\xff\xbc\x54\x00\x00";
+    let udp_53_pkg = b"\x08\x00\x27\x8d\xc0\x4d\x52\x54\x00\x12\x35\x02\x08\x00\x45\x00\x00\x52\x36\x04\x00\x00\x40\x11\x28\x79\x08\x08\x08\x08\x0a\x00\x02\x0f\x00\x35\xb5\x94\x00\x3e\x8b\xa8\x1a\x17\x85\x80\x00\x01\x00\x01\x00\x00\x00\x00\x06\x67\x6f\x6f\x67\x6c\x65\x03\x63\x6f\x6d\x00\x00\x01\x00\x01\x06\x67\x6f\x6f\x67\x6c\x65\x03\x63\x6f\x6d\x00\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04\x2e\x52\xae\x45";
+    let pkg = tcp_443_pkg;
+    let pkg = udp_53_pkg;
     let mut mmu = Mmu {
-        memory: dns_pkg.to_vec(),
+        memory: pkg.to_vec(),
     };
-    dbg!(&dns_pkg.len());
+    dbg!(&pkg.len());
     // let data_start = dns_pkg.as_ptr() as *const u8 as u64;
     // println!("data_start: 0x{:x}", data_start);
     let mut ctx = xdp_md {
@@ -179,11 +192,17 @@ fn test_udp() {
             mmu.read::<u8>(ctx.data_end as usize - 2)
         );
     }
-    emu.state.regs[1] = &ctx as *const xdp_md as u64;
+    mmu.write(0x1000, &ctx.data.to_le_bytes());
+    mmu.write(0x1004, &ctx.data_end.to_le_bytes());
+    println!("ctx.data : 0x{:x}", mmu.read::<u32>(0x1000));
+    println!("ctx.data_end : 0x{:x}", mmu.read::<u32>(0x1004));
+    let ctx_ptr = &ctx as *const xdp_md as u64;
+    emu.state.regs[1] = 0x1000;
+    emu.state.mmu = mmu;
     emu.instructions = ins_list.to_vec();
     // println!("{:x}", raw_ins_list[0]);
     // dbg!("before", &emu);
-    // emu.run();
+    emu.run();
     // dbg!("after", &emu);
 }
 #[test]
@@ -243,11 +262,20 @@ struct Mmu {
 
 impl Mmu {
     fn write(&mut self, addr: usize, val: &[u8]) {
+        if self.memory.len() < addr + val.len() {
+            self.memory.resize(addr + val.len() + 0x1000, 0);
+        }
         self.memory[addr..addr + val.len()].copy_from_slice(val)
     }
-    fn read<T>(&mut self, addr: usize) -> T {
-        let ptr = self.memory[addr..addr + core::mem::size_of::<T>()].as_ptr() as *const T;
-        unsafe { ptr.read_unaligned() }
+    fn read<T: std::fmt::LowerHex>(&mut self, addr: usize) -> T {
+        let read_size = core::mem::size_of::<T>();
+        let ptr = self.memory[addr..addr + read_size].as_ptr() as *const T;
+        let res = unsafe { ptr.read_unaligned() };
+        println!(
+            "read 0x{:x} bytes from addr 0x{:x}: 0x{:x}",
+            read_size, addr, res
+        );
+        res
     }
 }
 
@@ -286,13 +314,22 @@ impl Emu {
     fn step(&mut self) -> Option<()> {
         if let Some(ins) = self.instructions.get(self.pc as usize) {
             println!("{}: {:?}", self.pc, ins);
+            println!(
+                "regs: 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}",
+                self.state.regs[0],
+                self.state.regs[1],
+                self.state.regs[2],
+                self.state.regs[3],
+                self.state.regs[4]
+            );
             self.pc += 1;
             match &ins.code {
                 Code::AJ(ajcode) => {
                     let src = match &ajcode.source {
-                        IMM => ins.imm as u64,
-                        SRC => self.state.regs[ins.src as u8 as usize],
+                        Source::IMM => ins.imm as u64,
+                        Source::SRC => self.state.regs[ins.src as u8 as usize],
                     };
+                    // dbg!(src, ins.src, self.state.regs[ins.src as u8 as usize], &ajcode.source);
                     match &ajcode.class {
                         Class::ALU | Class::ALU64 => {
                             let mut dst = match &ajcode.class {
@@ -332,6 +369,7 @@ impl Emu {
                                     (*dst) >>= src;
                                 }
                                 AOp::NEG => {
+                                    todo!();
                                     // TODO
                                     // self.state.regs[ins.dst as u8 as usize] = src;
                                 }
@@ -358,14 +396,22 @@ impl Emu {
                                     match ins.imm {
                                         16 => {
                                             match &ajcode.source {
-                                                IMM => (*dst) = u16::to_le(*dst as u16) as u64,
-                                                SRC => (*dst) = u16::to_be(*dst as u16) as u64,
+                                                Source::IMM => {
+                                                    (*dst) = u16::to_le(*dst as u16) as u64
+                                                }
+                                                Source::SRC => {
+                                                    (*dst) = u16::to_be(*dst as u16) as u64
+                                                }
                                             };
                                         }
                                         32 => {
                                             match &ajcode.source {
-                                                IMM => (*dst) = u32::to_le(*dst as u32) as u64,
-                                                SRC => (*dst) = u32::to_be(*dst as u32) as u64,
+                                                Source::IMM => {
+                                                    (*dst) = u32::to_le(*dst as u32) as u64
+                                                }
+                                                Source::SRC => {
+                                                    (*dst) = u32::to_be(*dst as u32) as u64
+                                                }
                                             };
                                         }
                                         _ => {
@@ -377,68 +423,81 @@ impl Emu {
                                     unimplemented!();
                                 }
                             }
-                            println!("{:?} dst, {:?}", aop, &ajcode.source);
+                            println!(
+                                "{:?} dst({:?}), {:?}({:?}|{:?})",
+                                aop, ins.dst, &ajcode.source, ins.src, ins.imm
+                            );
                         }
                         Class::JMP | Class::JMP32 => {
                             let off = ins.off as u32;
                             let mut dst = self.state.regs[ins.dst as u8 as usize];
 
                             let jop = (ajcode.op).into();
-                            println!("{:?} dst, {:?}, +off", jop, &ajcode.source);
+                            println!(
+                                "{:?} dst({:?}), {:?}({:?}|{:?}), +off({:?})",
+                                jop, ins.dst, &ajcode.source, ins.src, ins.imm, ins.off
+                            );
                             match jop {
                                 JOp::JA => {
-                                    //self.pc += off;
+                                    self.pc += off;
                                 }
                                 JOp::JEQ => {
                                     // println!("jeq dst, imm, +off");
                                     if dst == src {
-                                        //   self.pc += off;
+                                        self.pc += off;
                                     }
                                 }
                                 JOp::JGT => {
+                                    dbg!(dst, src);
                                     if dst > src {
-                                        //self.pc += off;
+                                        self.pc += off;
                                     }
                                 }
                                 JOp::JGE => {
                                     if dst >= src {
-                                        //self.pc += off;
+                                        self.pc += off;
                                     }
                                 }
                                 JOp::JSET => {
                                     // TODO
                                     if (dst & src) != 0 {
-                                        //self.pc += off;
+                                        self.pc += off;
                                     }
                                 }
                                 JOp::JNE => {
                                     if dst != src {
-                                        //self.pc += off;
+                                        self.pc += off;
                                     }
                                 }
                                 JOp::JSGT => {
                                     // TODO: dst > imm (signed)
                                     if dst > src {
-                                        // self.pc += off;
+                                        self.pc += off;
                                     }
                                 }
                                 JOp::JSGE => {}
                                 JOp::CALL => {
+                                    todo!();
                                     // TODO: function call
                                     //self.pc = 0;
                                     // self.state.register[]
                                 }
                                 JOp::EXIT => {
-                                    // self.state.register[0]
+                                    println!(
+                                        "exit, R0={:?}(0x{:x})",
+                                        xdp_action::from(self.state.regs[0] as u8),
+                                        self.state.regs[0]
+                                    );
+                                    return None;
                                 }
                                 JOp::JLT => {
                                     if dst < src {
-                                        //   self.pc += off;
+                                        self.pc += off;
                                     }
                                 }
                                 JOp::JLE => {
                                     if dst <= src {
-                                        //  self.pc += off;
+                                        self.pc += off;
                                     }
                                 }
                                 JOp::JSLT => {}
@@ -492,17 +551,48 @@ impl Emu {
                                     assert!(w == 0xffff_ffff);
                                     (*dst) = imm & w;
                                 }
+                                // | 0x40
                                 MODE_ABS | MODE_IND => {
                                     // ABS: legacy BPF packet access (absolute)
                                     // IDN: legacy BPF packet access (indirect)
                                     // (deprecated)
                                     unreachable!();
                                 }
+                                // 0x60
                                 MODE_MEM => {
                                     assert!(lscode.class == Class::LDX);
                                     // regular load and store operations
                                     // dst_reg = *(size *) (src_reg + off)
-                                    (*dst) = (src + imm) & w
+                                    match lscode.size {
+                                        // W u32
+                                        0x00 => unsafe {
+                                            *(dst as *mut u64 as *mut u32) =
+                                                self.state.mmu.read::<u32>(
+                                                    (src as i64 + ins.off as i64) as usize,
+                                                );
+                                        },
+                                        // H u16
+                                        0x08 => unsafe {
+                                            *(dst as *mut u64 as *mut u16) =
+                                                self.state.mmu.read::<u16>(
+                                                    (src as i64 + ins.off as i64) as usize,
+                                                );
+                                        },
+                                        // B u8
+                                        0x10 => unsafe {
+                                            *(dst as *mut u64 as *mut u8) = self
+                                                .state
+                                                .mmu
+                                                .read::<u8>((src as i64 + ins.off as i64) as usize);
+                                        },
+                                        // DW u64
+                                        0x18 => unsafe {
+                                            *(dst as *mut u64) = self.state.mmu.read::<u64>(
+                                                (src as i64 + ins.off as i64) as usize,
+                                            );
+                                        },
+                                        _ => unreachable!(),
+                                    };
                                 }
                                 _ => unreachable!(),
                             }
@@ -578,30 +668,6 @@ impl Emu {
             if self.step().is_none() {
                 break;
             }
-        }
-    }
-    fn run1(&mut self) {
-        for ins in &self.instructions {
-            println!("execute ins: {:?}", ins);
-            match &ins.code {
-                Code::AJ(ajcode) => match &ajcode.class {
-                    ALU64 => match &ajcode.op {
-                        MOV => match &ajcode.source {
-                            IMM => {
-                                println!("mov dst, imm");
-                                self.state.regs[ins.dst as u8 as usize] = ins.imm as u64;
-                            }
-                            SRC => {
-                                println!("mov dst, src");
-                                self.state.regs[ins.dst as u8 as usize] =
-                                    self.state.regs[ins.src as u8 as usize];
-                            }
-                        },
-                    },
-                },
-                Code::LS(lscode) => {}
-            }
-            break;
         }
     }
 }
