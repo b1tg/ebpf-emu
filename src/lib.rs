@@ -1,3 +1,4 @@
+use core::ptr::copy_nonoverlapping;
 use std::collections::VecDeque;
 pub fn add(left: usize, right: usize) -> usize {
     left + right
@@ -271,11 +272,19 @@ impl Mmu {
         let read_size = core::mem::size_of::<T>();
         let ptr = self.memory[addr..addr + read_size].as_ptr() as *const T;
         let res = unsafe { ptr.read_unaligned() };
-        println!(
-            "read 0x{:x} bytes from addr 0x{:x}: 0x{:x}",
-            read_size, addr, res
-        );
+        // println!(
+        //     "read 0x{:x} bytes from addr 0x{:x}: 0x{:x}",
+        //     read_size, addr, res
+        // );
         res
+    }
+    fn read_ptr<T: std::fmt::LowerHex>(&mut self, addr: usize) -> *const T {
+        let read_size = core::mem::size_of::<T>();
+        let ptr = self.memory[addr..addr + read_size].as_ptr() as *const T;
+        ptr
+    }
+    fn read_ptr_mut<T: std::fmt::LowerHex>(&mut self, addr: usize) -> *mut T {
+        self.read_ptr::<T>(addr) as *mut T
     }
 }
 
@@ -313,9 +322,11 @@ impl Emu {
     }
     fn step(&mut self) -> Option<()> {
         if let Some(ins) = self.instructions.get(self.pc as usize) {
+            // Mnemonic
+            let mut mne = "".to_string();
             println!("{}: {:?}", self.pc, ins);
             println!(
-                "regs: 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}, 0x{:x}",
+                "regs: r0=0x{:x}, r1=0x{:x}, r2=0x{:x}, r3=0x{:x}, r4=0x{:x}",
                 self.state.regs[0],
                 self.state.regs[1],
                 self.state.regs[2],
@@ -324,15 +335,18 @@ impl Emu {
             );
             self.pc += 1;
             match &ins.code {
-                Code::AJ(ajcode) => {
-                    let src = match &ajcode.source {
-                        Source::IMM => ins.imm as u64,
-                        Source::SRC => self.state.regs[ins.src as u8 as usize],
+                Code::AJ { op, source, class } => {
+                    let (src, src_desc) = match &source {
+                        Source::IMM => (ins.imm as u64, format!("0x{:x}", ins.imm)),
+                        Source::SRC => (
+                            self.state.regs[ins.src as u8 as usize],
+                            format!("{:?}", ins.src),
+                        ),
                     };
-                    // dbg!(src, ins.src, self.state.regs[ins.src as u8 as usize], &ajcode.source);
-                    match &ajcode.class {
+                    // dbg!(src, ins.src, self.state.regs[ins.src as u8 as usize], &source);
+                    match &class {
                         Class::ALU | Class::ALU64 => {
-                            let mut dst = match &ajcode.class {
+                            let mut dst = match &class {
                                 Class::ALU => {
                                     let mut dst = &mut self.state.regs[ins.dst as u8 as usize];
                                     (*dst) &= 0x0000_0000_ffff_ffff;
@@ -341,48 +355,49 @@ impl Emu {
                                 Class::ALU64 => &mut self.state.regs[ins.dst as u8 as usize],
                                 _ => unreachable!(),
                             };
-                            let aop = (ajcode.op).into();
-                            match aop {
-                                AOp::ADD => {
+                            mne = format!("{:?} {:?}, {}", op, ins.dst, src_desc).to_lowercase();
+                            match op {
+                                OP::alu(AOp::ADD) => {
                                     // do we need wrapping_add ?
                                     (*dst) += src;
                                 }
-                                AOp::SUB => {
+                                OP::alu(AOp::SUB) => {
                                     (*dst) -= src;
                                 }
-                                AOp::MUL => {
+                                OP::alu(AOp::MUL) => {
                                     (*dst) *= src;
                                 }
-                                AOp::DIV => {
+                                OP::alu(AOp::DIV) => {
                                     (*dst) /= src;
                                 }
-                                AOp::OR => {
+                                OP::alu(AOp::OR) => {
                                     (*dst) |= src;
                                 }
-                                AOp::AND => {
+                                OP::alu(AOp::AND) => {
                                     (*dst) &= src;
                                 }
-                                AOp::LSH => {
+                                OP::alu(AOp::LSH) => {
                                     (*dst) <<= src;
                                 }
-                                AOp::RSH => {
+                                OP::alu(AOp::RSH) => {
                                     (*dst) >>= src;
                                 }
-                                AOp::NEG => {
+                                OP::alu(AOp::NEG) => {
                                     todo!();
                                     // TODO
                                     // self.state.regs[ins.dst as u8 as usize] = src;
                                 }
-                                AOp::MOD => {
+                                OP::alu(AOp::MOD) => {
                                     (*dst) %= src;
                                 }
-                                AOp::XOR => {
+                                OP::alu(AOp::XOR) => {
                                     (*dst) ^= src;
                                 }
-                                AOp::MOV => {
+                                OP::alu(AOp::MOV) => {
+                                    // mne = format!("mov {:?}, {}", ins.dst, src_desc);
                                     (*dst) = src;
                                 }
-                                AOp::ARSH => {
+                                OP::alu(AOp::ARSH) => {
                                     // TODO dst >>= imm (arithmetic)
                                     // (*dst) >>= src;
                                     unsafe { *(dst as *mut u64 as *mut i64) >>= src };
@@ -391,11 +406,11 @@ impl Emu {
                                 // 0xd4 0b1101_0100 (imm=16) le16 dst : dst = htole16(dst)
                                 // 0xd4 0b1101_0100 (imm=32) le32 dst
                                 // 0xdc 0b1101_1100 (imm=16) be16 dst
-                                AOp::END => {
+                                OP::alu(AOp::END) => {
                                     // TODO
                                     match ins.imm {
                                         16 => {
-                                            match &ajcode.source {
+                                            match &source {
                                                 Source::IMM => {
                                                     (*dst) = u16::to_le(*dst as u16) as u64
                                                 }
@@ -405,7 +420,7 @@ impl Emu {
                                             };
                                         }
                                         32 => {
-                                            match &ajcode.source {
+                                            match &source {
                                                 Source::IMM => {
                                                     (*dst) = u32::to_le(*dst as u32) as u64
                                                 }
@@ -423,66 +438,85 @@ impl Emu {
                                     unimplemented!();
                                 }
                             }
-                            println!(
-                                "{:?} dst({:?}), {:?}({:?}|{:?})",
-                                aop, ins.dst, &ajcode.source, ins.src, ins.imm
-                            );
+
+                            match &source {
+                                Source::IMM => {
+                                    println!("{:?} {:?}, 0x{:x}", op, ins.dst, ins.imm);
+                                }
+                                Source::SRC => {
+                                    println!("{:?} {:?}, {:?}", op, ins.dst, ins.src);
+                                }
+                            };
+                            // println!("mne: {}", mne);
                         }
                         Class::JMP | Class::JMP32 => {
                             let off = ins.off as u32;
                             let mut dst = self.state.regs[ins.dst as u8 as usize];
 
-                            let jop = (ajcode.op).into();
-                            println!(
-                                "{:?} dst({:?}), {:?}({:?}|{:?}), +off({:?})",
-                                jop, ins.dst, &ajcode.source, ins.src, ins.imm, ins.off
-                            );
-                            match jop {
-                                JOp::JA => {
+                            // println!(
+                            //     "{:?} dst({:?}), {:?}({:?}|{:?}), +off({:?})",
+                            //     op, ins.dst, &source, ins.src, ins.imm, ins.off
+                            // );
+                            match &source {
+                                Source::IMM => {
+                                    println!(
+                                        "{:?} {:?}, 0x{:x}, +0x{:x}",
+                                        op, ins.dst, ins.imm, ins.off
+                                    );
+                                }
+                                Source::SRC => {
+                                    println!(
+                                        "{:?} {:?}, {:?}, +0x{:x}",
+                                        op, ins.dst, ins.src, ins.off
+                                    );
+                                }
+                            };
+                            println!("jmp: {:?}", op);
+                            match op {
+                                OP::jmp(JOp::JA) => {
                                     self.pc += off;
                                 }
-                                JOp::JEQ => {
+                                OP::jmp(JOp::JEQ) => {
                                     // println!("jeq dst, imm, +off");
                                     if dst == src {
                                         self.pc += off;
                                     }
                                 }
-                                JOp::JGT => {
-                                    dbg!(dst, src);
+                                OP::jmp(JOp::JGT) => {
                                     if dst > src {
                                         self.pc += off;
                                     }
                                 }
-                                JOp::JGE => {
+                                OP::jmp(JOp::JGE) => {
                                     if dst >= src {
                                         self.pc += off;
                                     }
                                 }
-                                JOp::JSET => {
+                                OP::jmp(JOp::JSET) => {
                                     // TODO
                                     if (dst & src) != 0 {
                                         self.pc += off;
                                     }
                                 }
-                                JOp::JNE => {
+                                OP::jmp(JOp::JNE) => {
                                     if dst != src {
                                         self.pc += off;
                                     }
                                 }
-                                JOp::JSGT => {
+                                OP::jmp(JOp::JSGT) => {
                                     // TODO: dst > imm (signed)
                                     if dst > src {
                                         self.pc += off;
                                     }
                                 }
-                                JOp::JSGE => {}
-                                JOp::CALL => {
+                                OP::jmp(JOp::JSGE) => {}
+                                OP::jmp(JOp::CALL) => {
                                     todo!();
                                     // TODO: function call
                                     //self.pc = 0;
                                     // self.state.register[]
                                 }
-                                JOp::EXIT => {
+                                OP::jmp(JOp::EXIT) => {
                                     println!(
                                         "exit, R0={:?}(0x{:x})",
                                         xdp_action::from(self.state.regs[0] as u8),
@@ -490,18 +524,21 @@ impl Emu {
                                     );
                                     return None;
                                 }
-                                JOp::JLT => {
+                                OP::jmp(JOp::JLT) => {
                                     if dst < src {
                                         self.pc += off;
                                     }
                                 }
-                                JOp::JLE => {
+                                OP::jmp(JOp::JLE) => {
                                     if dst <= src {
                                         self.pc += off;
                                     }
                                 }
-                                JOp::JSLT => {}
-                                JOp::JSLE => {}
+                                OP::jmp(JOp::JSLT) => {}
+                                OP::jmp(JOp::JSLE) => {}
+                                _ => {
+                                    unreachable!();
+                                }
                             }
                         }
                         _ => {
@@ -509,20 +546,20 @@ impl Emu {
                         }
                     }
                 }
-                Code::LS(lscode) => {
-                    let mode = lscode.mode;
-                    let w = match lscode.size {
+                // Load & Store
+                Code::LS { mode, size, class } => {
+                    let w = match size {
                         // W
-                        0x00 => 0xffff,
+                        0x00 => 4,
                         // H
-                        0x08 => 0xff,
+                        0x08 => 2,
                         // B
-                        0x10 => 0xf,
+                        0x10 => 1,
                         // DW
-                        0x18 => 0xffff_ffff,
+                        0x18 => 8,
                         _ => unreachable!(),
                     };
-                    let size_sign = match lscode.size {
+                    let size_sign = match size {
                         // W
                         0x00 => "W",
                         // H
@@ -533,65 +570,48 @@ impl Emu {
                         0x18 => "DW",
                         _ => unreachable!(),
                     };
-                    // let class = lscode.class;
+                    // let class = class;
                     let imm = ins.imm as u64;
                     let src = self.state.regs[ins.src as u8 as usize];
                     let mut dst = &mut self.state.regs[ins.dst as u8 as usize];
 
-                    println!(
-                        "{:?}[{}] dst, [{:?} +off]",
-                        &lscode.class, size_sign, &ins.src
-                    );
-                    match &lscode.class {
+                    // println!(
+                    //     "{:?}[{}] {:?}, [{:?} +off]",
+                    //     &class, size_sign, &ins.dst, &ins.src
+                    // );
+                    match &class {
                         Class::LD | Class::LDX => {
+                            println!(
+                                "{:?}[{}] {:?}, [{:?} +off]",
+                                &class, size_sign, &ins.dst, &ins.src
+                            );
                             // dst_reg = *(size *) ((imm32 | src_reg) + off)
-                            match mode {
-                                MODE_IMM => {
+                            match *mode {
+                                Mode::IMM => {
                                     // BPF_LD | BPF_DW | BPF_IMM
-                                    assert!(w == 0xffff_ffff);
-                                    (*dst) = imm & w;
+                                    // assert!(w == 0xffff_ffff);
+                                    // (*dst) = imm & w;
                                 }
                                 // | 0x40
-                                MODE_ABS | MODE_IND => {
+                                Mode::ABS | Mode::IND => {
                                     // ABS: legacy BPF packet access (absolute)
                                     // IDN: legacy BPF packet access (indirect)
                                     // (deprecated)
                                     unreachable!();
                                 }
                                 // 0x60
-                                MODE_MEM => {
-                                    assert!(lscode.class == Class::LDX);
+                                Mode::MEM => {
+                                    assert!(class == &Class::LDX);
                                     // regular load and store operations
                                     // dst_reg = *(size *) (src_reg + off)
-                                    match lscode.size {
-                                        // W u32
-                                        0x00 => unsafe {
-                                            *(dst as *mut u64 as *mut u32) =
-                                                self.state.mmu.read::<u32>(
-                                                    (src as i64 + ins.off as i64) as usize,
-                                                );
-                                        },
-                                        // H u16
-                                        0x08 => unsafe {
-                                            *(dst as *mut u64 as *mut u16) =
-                                                self.state.mmu.read::<u16>(
-                                                    (src as i64 + ins.off as i64) as usize,
-                                                );
-                                        },
-                                        // B u8
-                                        0x10 => unsafe {
-                                            *(dst as *mut u64 as *mut u8) = self
-                                                .state
-                                                .mmu
-                                                .read::<u8>((src as i64 + ins.off as i64) as usize);
-                                        },
-                                        // DW u64
-                                        0x18 => unsafe {
-                                            *(dst as *mut u64) = self.state.mmu.read::<u64>(
+                                    unsafe {
+                                        copy_nonoverlapping(
+                                            self.state.mmu.read_ptr_mut::<u8>(
                                                 (src as i64 + ins.off as i64) as usize,
-                                            );
-                                        },
-                                        _ => unreachable!(),
+                                            ),
+                                            dst as *mut u64 as *mut u8,
+                                            w,
+                                        )
                                     };
                                 }
                                 _ => unreachable!(),
@@ -599,16 +619,37 @@ impl Emu {
                         }
                         Class::ST | Class::STX => {
                             // *(size *) (dst_reg + off) = (imm32 | src_reg)
-                            let source = match &lscode.class {
-                                Class::ST => imm,
-                                Class::STX => src,
+                            let source = match &class {
+                                Class::ST => {
+                                    println!(
+                                        "{:?}[{}] [{:?} +off], {:?}",
+                                        &class, size_sign, &ins.dst, &ins.imm
+                                    );
+                                    imm
+                                }
+                                Class::STX => {
+                                    println!(
+                                        "{:?}[{}] [{:?} +off], {:?}",
+                                        &class, size_sign, &ins.dst, &ins.src
+                                    );
+                                    src
+                                }
                                 _ => unreachable!(),
                             };
-                            match mode {
-                                MODE_MEM => {
+                            match *mode {
+                                Mode::MEM => {
                                     // regular load and store operations
                                     // *(size *) (dst_reg + off) = src_reg
-                                    match lscode.size {
+                                    unsafe {
+                                        copy_nonoverlapping(
+                                            src as *mut u64 as *mut u8,
+                                            self.state.mmu.read_ptr_mut::<u8>(
+                                                (*dst as i64 + ins.off as i64) as usize,
+                                            ),
+                                            w,
+                                        )
+                                    };
+                                    match size {
                                         // W u32
                                         0x00 => unsafe {
                                             *(dst as *mut u64 as *mut u32).offset(imm as isize) =
@@ -632,7 +673,7 @@ impl Emu {
                                         _ => unreachable!(),
                                     };
                                 }
-                                MODE_ATOMIC => {
+                                Mode::ATOMIC => {
                                     todo!();
                                     // STX only
                                     // atomic operations
@@ -689,19 +730,47 @@ impl Emu {
 //   +--------+--------+-------------------+
 //   (MSB)                             (LSB)
 
+// #[derive(Debug, Clone)]
+// enum Code {
+//     AJ(AJcode), // arithmetic and jump: ALU/ALU64/JMP
+//     LS(LScode), // load and store:  LD/LDX/ST/STX
+// }
+
 #[derive(Debug, Clone)]
 enum Code {
-    AJ(AJcode), // arithmetic and jump: ALU/ALU64/JMP
-    LS(LScode), // load and store:  LD/LDX/ST/STX
+    AJ {
+        op: OP,         // 4bits
+        source: Source, // 1bits
+        class: Class,   // 3bits
+    },
+    LS {
+        mode: Mode,   // 3bits
+        size: u8,     // 2bits
+        class: Class, // 3bits
+    },
 }
 
 impl From<u8> for Code {
     fn from(code: u8) -> Self {
         let class = code & 0b111;
-        if [CLASS_ALU, CLASS_ALU64, CLASS_JMP].contains(&class) {
-            Code::AJ(AJcode::from(code))
+        if [CLASS_ALU, CLASS_ALU64].contains(&class) {
+            Code::AJ {
+                op: OP::alu((code >> 4).into()),
+                source: ((code >> 3) & 0b1).into(),
+                class: (code & 0b111).into(),
+            }
+        } else if [CLASS_JMP].contains(&class) {
+            Code::AJ {
+                op: OP::jmp((code >> 4).into()),
+                source: ((code >> 3) & 0b1).into(),
+                class: (code & 0b111).into(),
+            }
         } else if [CLASS_LD, CLASS_LDX, CLASS_ST, CLASS_STX].contains(&class) {
-            Code::LS(LScode::from(code))
+            Code::LS {
+                mode: (code & 0b1110_0000).into(),
+                size: code & 0b0001_1000,
+                class: (code & 0b111).into(),
+            }
         } else {
             unimplemented!()
         }
@@ -709,25 +778,21 @@ impl From<u8> for Code {
 }
 
 #[derive(Debug, Clone)]
-struct AJcode {
-    op: u8,         // 4bits
-    source: Source, // 1bits
-    class: Class,   // 3bits
+#[repr(u8)]
+enum Mode {
+    IMM = 0x00,
+    ABS = 0x20,
+    IND = 0x40,
+    MEM = 0x60,
+    ATOMIC = 0xc0,
 }
 
-#[derive(Debug, Clone)]
-struct LScode {
-    mode: u8,     // 3bits
-    size: u8,     // 2bits
-    class: Class, // 3bits
+impl From<u8> for Mode {
+    fn from(val: u8) -> Self {
+        assert!(val <= 0xc0);
+        unsafe { core::ptr::read_unaligned(&(val as u8) as *const u8 as *const Mode) }
+    }
 }
-
-const MODE_IMM: u8 = 0x00;
-const MODE_ABS: u8 = 0x20;
-const MODE_IND: u8 = 0x40;
-const MODE_MEM: u8 = 0x60;
-const MODE_ATOMIC: u8 = 0xc0;
-
 #[derive(Debug, Clone)]
 #[repr(u8)]
 enum Source {
@@ -741,7 +806,14 @@ impl From<u8> for Source {
         unsafe { core::ptr::read_unaligned(&(val as u8) as *const u8 as *const Source) }
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[repr(u8)]
+enum OP {
+    alu(AOp),
+    jmp(JOp),
+}
+
+#[derive(Debug, Clone)]
 #[repr(u8)]
 enum AOp {
     ADD = 0,
@@ -760,7 +832,7 @@ enum AOp {
     END,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[repr(u8)]
 enum JOp {
     JA = 0,
@@ -811,27 +883,6 @@ impl From<u8> for Class {
     }
 }
 
-impl From<u8> for AJcode {
-    fn from(code: u8) -> Self {
-        AJcode {
-            op: code >> 4,
-            source: ((code >> 3) & 0b1).into(),
-            class: (code & 0b111).into(),
-        }
-    }
-}
-
-impl From<u8> for LScode {
-    fn from(code: u8) -> Self {
-        LScode {
-            //mode: code >> 5,
-            mode: code & 0b1110_0000,
-            //size: (code >> 3) & 0b11,
-            size: code & 0b0001_1000,
-            class: (code & 0b111).into(),
-        }
-    }
-}
 /// eBPF classes: BPF_CLASS(code)
 /// 占用3bits
 
