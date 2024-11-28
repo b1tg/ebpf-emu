@@ -100,6 +100,7 @@ fn decode_b16(input: String) -> Vec<u8> {
     x.collect()
 }
 
+#[ignore = "use for command line"]
 #[test]
 fn test_bpf_conformance() {
     // memory: aa  bb  ff  ff  ff  ff  ff  ff  ff  ff  cc  dd
