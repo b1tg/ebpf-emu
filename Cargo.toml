@@ -10,3 +10,7 @@ edition = "2021"
 
 [lib]
 doctest = false
+
+[[bin]]
+name = "emem"
+path = "src/main.rs"
