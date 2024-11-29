@@ -1,14 +1,11 @@
-use std::{
-    ops::{Shr, SubAssign},
-    ptr::copy_nonoverlapping,
-};
+use std::ptr::copy_nonoverlapping;
 
 use crate::{AOp, Class, Code, Instruction, JOp, Mmu, Mode, Source, OP};
 const ATOMIC_XOR: i64 = 0xa0; // 0
 const ATOMIC_AND: i64 = 0x50;
 const ATOMIC_OR: i64 = 0x40;
 const ATOMIC_ADD: i64 = 0x00;
-const ATOMIC_FETCH_ADD: i64 = 0x01;
+const _ATOMIC_FETCH_ADD: i64 = 0x01; // FETCH instructions with 0x01
 const ATOMIC_XCHG: i64 = 0xe0; // 0xe1
 const ATOMIC_CMPXCHG: i64 = 0xf0; // 0xf1
 #[derive(Debug)]
@@ -25,7 +22,7 @@ pub struct Emu {
     pub instructions: Vec<Instruction>,
     is_xdp: bool,
     pub fp: Vec<u32>,
-    DEBUG: bool,
+    debug: bool,
 }
 
 impl Default for Emu {
@@ -40,22 +37,15 @@ impl Default for Emu {
             ins_count: 0,
             is_xdp: false,
             fp: vec![],
-            DEBUG: std::env::var("DEBUG").unwrap_or_else(|_| "0".to_string()) == "1",
+            debug: std::env::var("DEBUG").unwrap_or_else(|_| "0".to_string()) == "1",
         }
     }
 }
 
 impl Emu {
-    // fn init(&mut self, r1: usize, ins: Vec<Instruction>) {
-    //     self.state.regs[1] = r1 as u64;
-    //     self.instructions = ins;
-    //     self.DEBUG = std::env::var("DEBUG").unwrap_or_else(|_| "0".to_string()) == "1";
-    // }
     fn step(&mut self) -> Option<()> {
         if let Some(ins) = self.instructions.get(self.pc as usize) {
-            // Mnemonic
-            let mut mne = "".to_string();
-            if self.DEBUG {
+            if self.debug {
                 println!(
                     "regs: pc={} r0=0x{:x}, r1=0x{:x}, r2=0x{:x}, r3=0x{:x}, r4=0x{:x}, r10=0x{:x}",
                     self.pc,
@@ -71,35 +61,19 @@ impl Emu {
             self.pc += 1;
             match &ins.code {
                 Code::AJ { op, source, class } => {
-                    let (mut src, src_desc) = match &source {
+                    let (mut src, _src_desc) = match &source {
                         Source::IMM => (ins.imm as i64, format!("0x{:x}", ins.imm)),
                         Source::SRC => (
                             self.state.regs[ins.src as u8 as usize] as i64,
                             format!("{:?}", ins.src),
                         ),
                     };
-                    // dbg!(src, ins.src, self.state.regs[ins.src as u8 as usize], &source);
                     match &class {
                         Class::ALU | Class::ALU64 => {
-                            // let src1: i32 = match &source {
-                            //     Source::IMM => {
-                            //         if DEBUG {
-                            //             println!("{:?} {:?}, 0x{:x}", op, ins.dst, ins.imm);
-                            //         }
-                            //         self.state.regs[ins.src as u8 as usize] as i32
-                            //     }
-                            //     Source::SRC => {
-                            //         if DEBUG {
-                            //             println!("{:?} {:?}, {:?}", op, ins.dst, ins.src);
-                            //         }
-                            //         ins.imm
-                            //     }
-                            // };
                             let dst = match &class {
                                 Class::ALU => {
                                     let dst = &mut self.state.regs[ins.dst as u8 as usize];
-                                    // (*dst) &= 0x0000_0000_ffff_ffff;
-                                    if *op != OP::alu(AOp::END) {
+                                    if *op != OP::Alu(AOp::END) {
                                         *dst = *dst as u32 as i64;
                                     }
                                     dst
@@ -107,25 +81,21 @@ impl Emu {
                                 Class::ALU64 => &mut self.state.regs[ins.dst as u8 as usize],
                                 _ => unreachable!(),
                             };
-                            if *class == Class::ALU && *op != OP::alu(AOp::END) {
+                            if *class == Class::ALU && *op != OP::Alu(AOp::END) {
                                 src = src as u32 as i64;
                             }
-
-                            mne = format!("{:?} {:?}, {}", op, ins.dst, src_desc).to_lowercase();
                             match op {
-                                OP::alu(AOp::ADD) => {
+                                OP::Alu(AOp::ADD) => {
                                     // do we need wrapping_add ?
                                     (*dst) += src;
-                                    // (*dst) = *dst+(src as i64);
                                 }
-                                OP::alu(AOp::SUB) => {
+                                OP::Alu(AOp::SUB) => {
                                     (*dst) -= src;
-                                    // (*dst) = dst.sub_assign(-src as i64);
                                 }
-                                OP::alu(AOp::MUL) => {
+                                OP::Alu(AOp::MUL) => {
                                     (*dst, _) = (*dst).overflowing_mul(src as _);
                                 }
-                                OP::alu(AOp::DIV) => {
+                                OP::Alu(AOp::DIV) => {
                                     // bpf_conformance/tests/div64-by-zero-reg.data
                                     // so we should do nothing?
                                     if src != 0 {
@@ -134,7 +104,6 @@ impl Emu {
                                                 as u32
                                                 as i64;
                                         } else {
-                                            // dbg!(*dst, src);
                                             // case div64-negative-imm.data
                                             // why need 0xFFFFFFFFFFFFFFFF/-10 == 1
                                             // (*dst) /= src;
@@ -147,13 +116,13 @@ impl Emu {
                                         *dst = 0;
                                     }
                                 }
-                                OP::alu(AOp::OR) => {
+                                OP::Alu(AOp::OR) => {
                                     (*dst) |= src;
                                 }
-                                OP::alu(AOp::AND) => {
+                                OP::Alu(AOp::AND) => {
                                     (*dst) &= src;
                                 }
-                                OP::alu(AOp::LSH) => {
+                                OP::Alu(AOp::LSH) => {
                                     if *class == Class::ALU {
                                         (*dst) = (*dst as u32).wrapping_shl(src as u32) as i64;
                                     } else {
@@ -163,32 +132,17 @@ impl Emu {
                                     // 0x0000_0011
                                     // why lsh32 0x11 -4 get 0x10000000
                                 }
-                                OP::alu(AOp::RSH) => {
+                                OP::Alu(AOp::RSH) => {
                                     if *class == Class::ALU {
                                         (*dst) = (*dst as u32).wrapping_shr(src as u32) as i64;
                                     } else {
                                         (*dst) = (*dst as u64).wrapping_shr(src as u32) as i64;
                                     }
                                 }
-                                OP::alu(AOp::NEG) => {
+                                OP::Alu(AOp::NEG) => {
                                     (*dst) = dst.overflowing_mul(-1).0;
-                                    if *class == Class::ALU64 {
-                                        // (self.state.regs[ins.dst as u8 as usize], _) =
-                                        // self.state.regs[ins.dst as u8 as usize].overflowing_mul(-1);
-                                        // (*dst) = dst.overflowing_mul(-1).0;
-                                        // self.state.regs[ins.dst as u8 as usize] =
-                                        //     0xffff_ffff_ffff_ffff
-                                        //         - self.state.regs[ins.dst as u8 as usize]
-                                        //         + 1;
-                                    } else {
-                                        // self.state.regs[ins.dst as u8 as usize]  =
-                                        // self.state.regs[ins.dst as u8 as usize].overflowing_mul(-1).0 as  u32  as  i64 ;
-                                        // self.state.regs[ins.dst as u8 as usize] = 0xffff_ffff
-                                        //     - self.state.regs[ins.dst as u8 as usize]
-                                        //     + 1;
-                                    }
                                 }
-                                OP::alu(AOp::MOD) => {
+                                OP::Alu(AOp::MOD) => {
                                     if src != 0 {
                                         // case mod64.data
                                         // why 0xb1858436100dc5c8 % 0xdde263e3cbef7f3 需要转换为u64结果才对
@@ -196,18 +150,17 @@ impl Emu {
                                         (*dst) = ((*dst as u64) % (src as u64)) as i64;
                                     }
                                 }
-                                OP::alu(AOp::XOR) => {
+                                OP::Alu(AOp::XOR) => {
                                     (*dst) ^= src;
                                 }
-                                OP::alu(AOp::MOV) => {
-                                    // mne = format!("mov {:?}, {}", ins.dst, src_desc);
+                                OP::Alu(AOp::MOV) => {
                                     if *class == Class::ALU {
                                         (*dst) = src as u32 as i64;
                                     } else {
                                         (*dst) = src;
                                     }
                                 }
-                                OP::alu(AOp::ARSH) => {
+                                OP::Alu(AOp::ARSH) => {
                                     // TODO dst >>= imm (arithmetic)
                                     // (*dst) >>= src;
                                     // unsafe { *(dst as *mut u64 as *mut i64) >>= src };
@@ -265,7 +218,7 @@ impl Emu {
                                 // 0xd4 0b1101_0100 (imm=16) le16 dst : dst = htole16(dst)
                                 // 0xd4 0b1101_0100 (imm=32) le32 dst
                                 // 0xdc 0b1101_1100 (imm=16) be16 dst
-                                OP::alu(AOp::END) => {
+                                OP::Alu(AOp::END) => {
                                     // TODO
                                     match ins.imm {
                                         16 => {
@@ -313,9 +266,7 @@ impl Emu {
                                     unimplemented!();
                                 }
                             }
-
-                            // println!("mne: {}", mne);
-                            if *class == Class::ALU && *op != OP::alu(AOp::END) {
+                            if *class == Class::ALU && *op != OP::Alu(AOp::END) {
                                 *dst = *dst as u32 as i64;
                             }
                         }
@@ -346,11 +297,11 @@ impl Emu {
                             };
                             // println!("jmp: {:?}", op);
                             match op {
-                                OP::jmp(JOp::JA) => {
+                                OP::Jmp(JOp::JA) => {
                                     // self.pc += off;
                                     self.pc = self.pc.wrapping_add_signed(off);
                                 }
-                                OP::jmp(JOp::JEQ) => {
+                                OP::Jmp(JOp::JEQ) => {
                                     // println!(
                                     //     "{}: jeq dst({}), imm({}), +off({})",
                                     //     self.pc, dst, ins.imm, off
@@ -361,13 +312,13 @@ impl Emu {
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
-                                OP::jmp(JOp::JGT) => {
+                                OP::Jmp(JOp::JGT) => {
                                     if dst as i64 > src {
                                         // self.pc += off;
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
-                                OP::jmp(JOp::JGE) => {
+                                OP::Jmp(JOp::JGE) => {
                                     if dst as i64 >= src {
                                         // dbg!(self.pc, off);
                                         // self.pc += off;
@@ -376,20 +327,20 @@ impl Emu {
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
-                                OP::jmp(JOp::JSET) => {
+                                OP::Jmp(JOp::JSET) => {
                                     // TODO
                                     if (dst as i64 & src) != 0 {
                                         // self.pc += off;
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
-                                OP::jmp(JOp::JNE) => {
+                                OP::Jmp(JOp::JNE) => {
                                     if dst as i64 != src {
                                         // self.pc += off;
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
-                                OP::jmp(JOp::JSGT) => {
+                                OP::Jmp(JOp::JSGT) => {
                                     // TODO: dst as i64 > imm (signed)
                                     if dst as i64 > src {
                                         // dbg!(self.pc, off);
@@ -397,12 +348,12 @@ impl Emu {
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
-                                OP::jmp(JOp::JSGE) => {
+                                OP::Jmp(JOp::JSGE) => {
                                     if dst as i64 >= src {
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
-                                OP::jmp(JOp::CALL) => {
+                                OP::Jmp(JOp::CALL) => {
                                     // todo!();
                                     // TODO: function call
                                     if source == &Source::IMM {
@@ -415,7 +366,7 @@ impl Emu {
                                     }
                                     // self.state.register[]
                                 }
-                                OP::jmp(JOp::EXIT) => {
+                                OP::Jmp(JOp::EXIT) => {
                                     if self.is_xdp {
                                         // println!(
                                         //     "exit, R0={:?}(0x{:x})",
@@ -435,24 +386,24 @@ impl Emu {
                                         return None;
                                     }
                                 }
-                                OP::jmp(JOp::JLT) => {
+                                OP::Jmp(JOp::JLT) => {
                                     if (dst as i64) < src {
                                         // self.pc += off;
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
-                                OP::jmp(JOp::JLE) => {
+                                OP::Jmp(JOp::JLE) => {
                                     if dst as i64 <= src {
                                         // self.pc += off;
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
-                                OP::jmp(JOp::JSLT) => {
+                                OP::Jmp(JOp::JSLT) => {
                                     if (dst as i64) < src {
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
-                                OP::jmp(JOp::JSLE) => {
+                                OP::Jmp(JOp::JSLE) => {
                                     if (dst as i64) <= src {
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
@@ -496,7 +447,7 @@ impl Emu {
                     let mut src = self.state.regs[ins.src as u8 as usize];
                     let mut R0 = self.state.regs[0];
                     let dst = &mut self.state.regs[ins.dst as u8 as usize];
-                    if self.DEBUG {
+                    if self.debug {
                         println!(
                             "{:?}[{}] {:?}, [{:?} +off]",
                             &class, size_sign, &ins.dst, &ins.src
@@ -628,13 +579,6 @@ impl Emu {
                                     match imm & 0b1111_1110 {
                                         ATOMIC_ADD => {
                                             tmp_dst += src;
-                                        }
-                                        ATOMIC_FETCH_ADD => {
-                                            // TODO: fetch add 的语义
-                                            // case: lock_fetch_add.data
-                                            // let old_dst = tmp_dst;
-                                            tmp_dst += src;
-                                            // src = old_dst;
                                         }
                                         ATOMIC_OR => {
                                             tmp_dst |= src;
