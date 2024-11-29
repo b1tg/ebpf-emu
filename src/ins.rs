@@ -317,6 +317,66 @@ pub fn hexs_to_instructions(hx: &str) -> Result<Vec<Instruction>, String> {
 }
 
 #[test]
+fn test_atomic() {
+    //
+    use crate::Class::*;
+    use crate::Code::*;
+    use crate::Register::*;
+    // lock xor [%r10-8], %r1
+    let hx = "db  1a  f8  ff  a0  00  00  00";
+    assert_eq!(
+        hexs_to_instructions(hx),
+        Ok(vec![Instruction {
+            imm: 0xa0,
+            imm64: 0xa0,
+            off: -8,
+            src: R1,
+            dst: R10,
+            code: LS {
+                mode: Mode::ATOMIC,
+                size: 24,
+                class: STX,
+            },
+        },])
+    );
+    // lock or [%r10-8], %r1
+    let hx = "db  1a  f8  ff  40  00  00  00 ";
+    assert_eq!(
+        hexs_to_instructions(hx),
+        Ok(vec![Instruction {
+            imm: 0x40,
+            imm64: 0x40,
+            off: -8,
+            src: R1,
+            dst: R10,
+            code: LS {
+                mode: Mode::ATOMIC,
+                size: 0x18,
+                class: STX
+            }
+        }])
+    );
+    // lock or32 [%r10-8], %r1
+    // the difference lies in size
+    let hx = "c3  1a  f8  ff  40  00  00  00 ";
+    assert_eq!(
+        hexs_to_instructions(hx),
+        Ok(vec![Instruction {
+            imm: 0x40,
+            imm64: 0x40,
+            off: -8,
+            src: R1,
+            dst: R10,
+            code: LS {
+                mode: Mode::ATOMIC,
+                size: 0,
+                class: STX
+            }
+        }])
+    );
+}
+
+#[test]
 
 fn test_abc() {
     use crate::Class::*;

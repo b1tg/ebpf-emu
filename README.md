@@ -13,9 +13,15 @@ https://github.com/Alan-Jowett/bpf_conformance
     Passed 150 out of 160 tests.    
 - 2024/11/28 19:45
     Passed 160 out of 160 tests
+- 2024/11/29 11:29
+    Passed 176 out of 180 tests.
+- 2024/11/29 14:25
+    Passed 180 out of 180 tests.
 
 https://github.com/iovisor/bpf-docs/blob/master/eBPF.md
 
+
+https://docs.kernel.org/6.0/bpf/instruction-set.html
 
 ```
 /root/ebpf-emu $ RUST_BACKTRACE=1 cargo run --bin emem  "b4  02  00  00  11  00  00  00  73  21  02  00  00  00  00  00  71  10  02  00  00  00  00  00  95  00  00  00  00  00  00  00  " "aa  bb  ff  cc  dd  "

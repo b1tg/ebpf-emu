@@ -4,7 +4,13 @@ use std::{
 };
 
 use crate::{AOp, Class, Code, Instruction, JOp, Mmu, Mode, Source, OP};
-
+const ATOMIC_XOR: i64 = 0xa0; // 0
+const ATOMIC_AND: i64 = 0x50;
+const ATOMIC_OR: i64 = 0x40;
+const ATOMIC_ADD: i64 = 0x00;
+const ATOMIC_FETCH_ADD: i64 = 0x01;
+const ATOMIC_XCHG: i64 = 0xe0; // 0xe1
+const ATOMIC_CMPXCHG: i64 = 0xf0; // 0xf1
 #[derive(Debug)]
 pub struct State {
     pub regs: [i64; 11],
@@ -51,13 +57,14 @@ impl Emu {
             let mut mne = "".to_string();
             if self.DEBUG {
                 println!(
-                    "regs: pc={} r0=0x{:x}, r1=0x{:x}, r2=0x{:x}, r3=0x{:x}, r4=0x{:x}",
+                    "regs: pc={} r0=0x{:x}, r1=0x{:x}, r2=0x{:x}, r3=0x{:x}, r4=0x{:x}, r10=0x{:x}",
                     self.pc,
                     self.state.regs[0],
                     self.state.regs[1],
                     self.state.regs[2],
                     self.state.regs[3],
-                    self.state.regs[4]
+                    self.state.regs[4],
+                    self.state.regs[10],
                 );
                 println!("{}: {:?}", self.pc, ins);
             }
@@ -486,7 +493,8 @@ impl Emu {
                     };
                     // let class = class;
                     let imm = ins.imm64;
-                    let src = self.state.regs[ins.src as u8 as usize];
+                    let mut src = self.state.regs[ins.src as u8 as usize];
+                    let mut R0 = self.state.regs[0];
                     let dst = &mut self.state.regs[ins.dst as u8 as usize];
                     if self.DEBUG {
                         println!(
@@ -593,21 +601,87 @@ impl Emu {
                                     // };
                                 }
                                 Mode::ATOMIC => {
-                                    todo!();
+                                    // todo!();
                                     // STX only
                                     // atomic operations
                                     // imm use to encode atomic operations
-                                    // match imm {
-                                    //     ATOMIC_ADD => {
-                                    //         // (*dst.offset(off)) += src;
-                                    //     }
-                                    //     ATOMIC_OR => {}
-                                    //     ATOMIC_AND => {}
-                                    //     ATOMIC_XOR => {}
-                                    //     ATOMIC_FETCH => {}
-                                    //     ATOMIC_XCHG => {}
-                                    //     ATOMIC_CMPXCHG => {}
-                                    // };
+                                    let mut tmp_dst = self
+                                        .state
+                                        .mmu
+                                        .read::<i64>((*dst + ins.off as i64) as usize);
+                                    let with_fetch = imm & 0x01 == 0x01;
+                                    let mut old_dst: i64 = 0;
+                                    if with_fetch {
+                                        old_dst = tmp_dst;
+                                    }
+                                    // src = src as u32 as i64;
+                                    let mut high_dst = 0;
+                                    // dbg!(&size);
+                                    if *size == 0 {
+                                        src = src as u32 as i64;
+                                        high_dst = tmp_dst as u64 >> 32;
+                                        // println!("high_dst: {:x}, tmp_dst: {:x}",high_dst, tmp_dst);
+                                        tmp_dst = tmp_dst as u32 as i64;
+                                        R0 = R0 as u32 as i64;
+                                        old_dst = old_dst as u32 as i64;
+                                    }
+                                    match imm & 0b1111_1110 {
+                                        ATOMIC_ADD => {
+                                            tmp_dst += src;
+                                        }
+                                        ATOMIC_FETCH_ADD => {
+                                            // TODO: fetch add 的语义
+                                            // case: lock_fetch_add.data
+                                            // let old_dst = tmp_dst;
+                                            tmp_dst += src;
+                                            // src = old_dst;
+                                        }
+                                        ATOMIC_OR => {
+                                            tmp_dst |= src;
+                                        }
+                                        ATOMIC_AND => {
+                                            tmp_dst &= src;
+                                        }
+                                        ATOMIC_XOR => {
+                                            tmp_dst ^= src;
+                                        }
+                                        ATOMIC_XCHG => {
+                                            // lock xchg [%r10-8], %r1
+                                            (tmp_dst, old_dst) = (src, tmp_dst);
+                                        }
+                                        ATOMIC_CMPXCHG => {
+                                            // # Atomically compare %r0 and [%r10-8] and \
+                                            //  set [%r10-8] to %r1 if matches.
+                                            // lock cmpxchg [%r10-8], %r1
+                                            // lock cmpxchg32 [%r10-8], %r1
+                                            // TODO: should R1 changed?
+                                            // println!("== cmpxchg, {:x} => {:x}, old_dst: {:x}", tmp_dst, R0, old_dst);
+                                            if tmp_dst == R0 {
+                                                tmp_dst = src;
+                                            }
+                                            R0 = old_dst;
+                                        }
+                                        _ => {
+                                            unimplemented!(
+                                                "unknow atomic instruction, imm=0x{:x}",
+                                                imm
+                                            )
+                                        }
+                                    };
+                                    tmp_dst = tmp_dst + (high_dst << 32) as i64;
+                                    // dbg!(&tmp_dst, &high_dst);
+                                    self.state.mmu.write(
+                                        (*dst + ins.off as i64) as usize,
+                                        &tmp_dst.to_le_bytes(),
+                                    );
+                                    if with_fetch {
+                                        src = old_dst;
+                                        self.state.regs[ins.src as u8 as usize] = src;
+                                    }
+                                    // TODO: ugly
+                                    if imm & 0b1111_1110 == ATOMIC_CMPXCHG {
+                                        self.state.regs[0] = R0;
+                                    }
                                 }
                                 _ => unreachable!(),
                             }
