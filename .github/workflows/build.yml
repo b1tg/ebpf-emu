@@ -36,5 +36,5 @@ jobs:
         cmake --build build
     - name: Test with bpf_conformance
       run: |        
-    	cd bpf_conformance/build/bin
-	    RUST_BACKTRACE=1 ./bpf_conformance_runner --debug false --test_file_directory ../tests --plugin_path ../../../target/debug/emem 
+        cd bpf_conformance/build/bin
+        RUST_BACKTRACE=1 ./bpf_conformance_runner --debug false --test_file_directory ../tests --plugin_path ../../../target/debug/emem 
