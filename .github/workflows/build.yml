@@ -2,7 +2,7 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "ci" ]
   pull_request:
     branches: [ "main" ]
 
@@ -16,11 +16,15 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-      submodules: 'true'
+      with:
+        submodules: recursive
     - name: Install Pkgs
       run: |
         sudo apt-get update
         sudo apt-get install -y libboost-dev libboost-filesystem-dev libboost-program-options-dev libelf-dev lcov libbpf-dev      
+    - name: Install libbpf from source
+      run: bpf_conformance/.github/scripts/build-libbpf.sh
+      shell: bash
     - name: Build
       run: cargo build --verbose
     - name: Run tests
@@ -30,3 +34,7 @@ jobs:
         cd bpf_conformance
         cmake -S . -B build
         cmake --build build
+    - name: Test with bpf_conformance
+      run: |        
+        cd bpf_conformance/build/bin
+        RUST_BACKTRACE=1 ./bpf_conformance_runner --debug false --test_file_directory ../tests --plugin_path ../../../target/debug/emem 
