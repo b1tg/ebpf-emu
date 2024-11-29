@@ -2,7 +2,7 @@ name: Rust
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "ci" ]
   pull_request:
     branches: [ "main" ]
 
@@ -16,7 +16,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-      submodules: 'true'
+      with:
+        submodules: true
     - name: Install Pkgs
       run: |
         sudo apt-get update
