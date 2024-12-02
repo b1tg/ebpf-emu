@@ -8,6 +8,8 @@ const ATOMIC_ADD: i64 = 0x00;
 const _ATOMIC_FETCH_ADD: i64 = 0x01; // FETCH instructions with 0x01
 const ATOMIC_XCHG: i64 = 0xe0; // 0xe1
 const ATOMIC_CMPXCHG: i64 = 0xf0; // 0xf1
+const MASK_ATOMIC: i64 = 0b1111_1110;
+
 #[derive(Debug)]
 pub struct State {
     pub regs: [i64; 11],
@@ -20,7 +22,7 @@ pub struct Emu {
     ins_count: u32,
     pc: u32,
     pub instructions: Vec<Instruction>,
-    is_xdp: bool,
+    _is_xdp: bool,
     pub fp: Vec<u32>,
     debug: bool,
 }
@@ -35,7 +37,7 @@ impl Default for Emu {
             },
             instructions: Vec::new(),
             ins_count: 0,
-            is_xdp: false,
+            _is_xdp: false,
             fp: vec![],
             debug: std::env::var("DEBUG").unwrap_or_else(|_| "0".to_string()) == "1",
         }
@@ -269,19 +271,6 @@ impl Emu {
                                     }
                                 }
                                 OP::Jmp(JOp::EXIT) => {
-                                    if self.is_xdp {
-                                        // println!(
-                                        //     "exit, R0={:?}(0x{:x})",
-                                        //     xdp_action::from(self.state.regs[0] as u8),
-                                        //     self.state.regs[0]
-                                        // );
-                                    } else {
-                                        // println!(
-                                        //     "exit, R0={:?}(0x{:x})",
-                                        //     self.state.regs[0] as u8,
-                                        //     self.state.regs[0]
-                                        // );
-                                    }
                                     if self.fp.len() > 0 {
                                         self.pc = self.fp.pop().unwrap();
                                     } else {
@@ -329,8 +318,8 @@ impl Emu {
                     };
                     let imm = ins.imm64;
                     let mut src = self.state.regs[ins.src as u8 as usize];
-                    let mut R0 = self.state.regs[0];
-                    let dst = &mut self.state.regs[ins.dst as u8 as usize];
+                    let mut r0 = self.state.regs[0];
+                    let mut dst = self.state.regs[ins.dst as u8 as usize];
                     if self.debug {
                         println!(
                             "{:?}[{}] {:?}, [{:?} +off]",
@@ -341,31 +330,20 @@ impl Emu {
                         Class::LD | Class::LDX => {
                             match *mode {
                                 Mode::IMM => {
-                                    // panic!("???");
-                                    // BPF_LD | BPF_DW | BPF_IMM
-                                    // assert!(w == 0xffff_ffff);
-                                    // dbg!(imm, w, imm & (1 << w * 8 - 1));
-                                    // (*dst) = imm & (1 << w * 8 - 1);
-                                    (*dst) = imm; // & (1 << w * 8 - 1);
+                                    dst = imm;
                                 }
-                                // | 0x40
                                 Mode::ABS | Mode::IND => {
-                                    // ABS: legacy BPF packet access (absolute)
-                                    // IDN: legacy BPF packet access (indirect)
-                                    // (deprecated)
-                                    unreachable!();
+                                    unreachable!("legacy BPF packet access (deprecated)");
                                 }
-                                // 0x60
                                 Mode::MEM => {
                                     assert!(class == &Class::LDX);
-                                    // regular load and store operations
                                     // dst_reg = *(size *) (src_reg + off)
                                     unsafe {
                                         copy_nonoverlapping(
                                             self.state.mmu.read_ptr_mut::<u8>(
                                                 (src as i64 + ins.off as i64) as usize,
                                             ),
-                                            dst as *mut i64 as *mut u8,
+                                            &mut dst as *mut i64 as *mut u8,
                                             w as _,
                                         );
                                     };
@@ -381,65 +359,63 @@ impl Emu {
                             };
                             match *mode {
                                 Mode::MEM => {
-                                    // regular load and store operations
                                     // *(size *) (dst_reg + off) = src_reg
                                     unsafe {
                                         copy_nonoverlapping(
                                             &mut source as *mut i64 as *mut u8,
                                             self.state.mmu.read_ptr_mut::<u8>(
-                                                (*dst as i64 + ins.off as i64) as usize,
+                                                (dst + ins.off as i64) as usize,
                                             ),
                                             w as _,
                                         )
                                     };
                                 }
                                 Mode::ATOMIC => {
-                                    let mut tmp_dst = self
-                                        .state
-                                        .mmu
-                                        .read::<i64>((*dst + ins.off as i64) as usize);
+                                    let mut origin_dst_with_off =
+                                        self.state.mmu.read::<i64>((dst + ins.off as i64) as usize);
                                     let with_fetch = imm & 0x01 == 0x01;
-                                    let mut old_dst: i64 = 0;
+                                    let mut origin_dst_with_off_bak: i64 = 0;
                                     if with_fetch {
-                                        old_dst = tmp_dst;
+                                        origin_dst_with_off_bak = origin_dst_with_off;
                                     }
-                                    let mut high_dst = 0;
+                                    let mut origin_dst_with_off_high = 0;
                                     if *size == 0 {
                                         src = src as u32 as i64;
-                                        high_dst = tmp_dst as u64 >> 32;
-                                        tmp_dst = tmp_dst as u32 as i64;
-                                        R0 = R0 as u32 as i64;
-                                        old_dst = old_dst as u32 as i64;
+                                        origin_dst_with_off_high = origin_dst_with_off as u64 >> 32;
+                                        origin_dst_with_off = origin_dst_with_off as u32 as i64;
+                                        r0 = r0 as u32 as i64;
+                                        origin_dst_with_off_bak =
+                                            origin_dst_with_off_bak as u32 as i64;
                                     }
                                     // use imm to encode atomic operations
-                                    match imm & 0b1111_1110 {
+                                    match imm & MASK_ATOMIC {
                                         ATOMIC_ADD => {
-                                            tmp_dst += src;
+                                            origin_dst_with_off += src;
                                         }
                                         ATOMIC_OR => {
-                                            tmp_dst |= src;
+                                            origin_dst_with_off |= src;
                                         }
                                         ATOMIC_AND => {
-                                            tmp_dst &= src;
+                                            origin_dst_with_off &= src;
                                         }
                                         ATOMIC_XOR => {
-                                            tmp_dst ^= src;
+                                            origin_dst_with_off ^= src;
                                         }
                                         ATOMIC_XCHG => {
                                             // lock xchg [%r10-8], %r1
-                                            (tmp_dst, old_dst) = (src, tmp_dst);
+                                            (origin_dst_with_off, origin_dst_with_off_bak) =
+                                                (src, origin_dst_with_off);
                                         }
                                         ATOMIC_CMPXCHG => {
-                                            // # Atomically compare %r0 and [%r10-8] and \
-                                            //  set [%r10-8] to %r1 if matches.
                                             // lock cmpxchg [%r10-8], %r1
                                             // lock cmpxchg32 [%r10-8], %r1
+                                            // # Atomically compare %r0 and [%r10-8] and \
+                                            //  set [%r10-8] to %r1 if matches.
                                             // TODO: should R1 changed?
-                                            // println!("== cmpxchg, {:x} => {:x}, old_dst: {:x}", tmp_dst, R0, old_dst);
-                                            if tmp_dst == R0 {
-                                                tmp_dst = src;
+                                            if origin_dst_with_off == r0 {
+                                                origin_dst_with_off = src;
                                             }
-                                            R0 = old_dst;
+                                            self.state.regs[0] = origin_dst_with_off_bak;
                                         }
                                         _ => {
                                             unimplemented!(
@@ -448,25 +424,23 @@ impl Emu {
                                             )
                                         }
                                     };
-                                    tmp_dst = tmp_dst + (high_dst << 32) as i64;
+                                    origin_dst_with_off = origin_dst_with_off
+                                        + (origin_dst_with_off_high << 32) as i64;
                                     self.state.mmu.write(
-                                        (*dst + ins.off as i64) as usize,
-                                        &tmp_dst.to_le_bytes(),
+                                        (dst + ins.off as i64) as usize,
+                                        &origin_dst_with_off.to_le_bytes(),
                                     );
                                     if with_fetch {
-                                        src = old_dst;
+                                        src = origin_dst_with_off_bak;
                                         self.state.regs[ins.src as u8 as usize] = src;
-                                    }
-                                    // TODO: ugly
-                                    if imm & 0b1111_1110 == ATOMIC_CMPXCHG {
-                                        self.state.regs[0] = R0;
                                     }
                                 }
                                 _ => unreachable!(),
                             }
                         }
-                        _ => todo!(),
+                        _ => unreachable!(),
                     }
+                    self.state.regs[ins.dst as u8 as usize] = dst;
                 }
             }
             self.ins_count += 1;
