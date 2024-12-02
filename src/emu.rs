@@ -70,47 +70,27 @@ impl Emu {
                     };
                     match &class {
                         Class::ALU | Class::ALU64 => {
-                            let dst = match &class {
-                                Class::ALU => {
-                                    let dst = &mut self.state.regs[ins.dst as u8 as usize];
-                                    if *op != OP::Alu(AOp::END) {
-                                        *dst = *dst as u32 as i64;
-                                    }
-                                    dst
-                                }
-                                Class::ALU64 => &mut self.state.regs[ins.dst as u8 as usize],
-                                _ => unreachable!(),
-                            };
+                            let dst = &mut self.state.regs[ins.dst as u8 as usize];
                             if *class == Class::ALU && *op != OP::Alu(AOp::END) {
+                                *dst = *dst as u32 as i64;
                                 src = src as u32 as i64;
                             }
                             match op {
                                 OP::Alu(AOp::ADD) => {
-                                    // do we need wrapping_add ?
-                                    (*dst) += src;
+                                    *dst = (*dst).wrapping_add(src);
                                 }
                                 OP::Alu(AOp::SUB) => {
-                                    (*dst) -= src;
+                                    *dst = (*dst).wrapping_sub(src);
                                 }
                                 OP::Alu(AOp::MUL) => {
-                                    (*dst, _) = (*dst).overflowing_mul(src as _);
+                                    *dst = (*dst).wrapping_mul(src);
                                 }
                                 OP::Alu(AOp::DIV) => {
-                                    // bpf_conformance/tests/div64-by-zero-reg.data
-                                    // so we should do nothing?
                                     if src != 0 {
-                                        if *class == Class::ALU {
-                                            (*dst) = ((*dst as u32 as i64) / (src as u32 as i64))
-                                                as u32
-                                                as i64;
-                                        } else {
-                                            // case div64-negative-imm.data
-                                            // why need 0xFFFFFFFFFFFFFFFF/-10 == 1
-                                            // (*dst) /= src;
-                                            // case div64-negative-reg.data:
-                                            // why -1/0x0fffffff6 != 0xFFFFFFFFFFFFFFFF/0x0fffffff6
-                                            (*dst) = (*dst as u64).wrapping_div(src as u64) as i64;
-                                        }
+                                        // so, ebpf want unsigned div here, signed div have another instruction sdiv
+                                        // but, why other instructions use signed ops
+                                        // https://play.rust-lang.org/?version=stable&mode=debug&edition=2021&gist=d548d7e7229257857d075d2964c13bf5
+                                        (*dst) = (*dst as u64).wrapping_div(src as u64) as i64;
                                     } else {
                                         // case: div32-by-zero-reg.data wants this
                                         *dst = 0;
@@ -123,14 +103,15 @@ impl Emu {
                                     (*dst) &= src;
                                 }
                                 OP::Alu(AOp::LSH) => {
+                                    // case lsh32-reg-neg.data
+                                    // why lsh32 0x11(0x0000_0011) -4 get 0x1000_0000 ?
+                                    // because -4 is fffffffc, the shift here use unsigned value
+                                    // fffffffc = 7*4 + (8*4)*n
                                     if *class == Class::ALU {
                                         (*dst) = (*dst as u32).wrapping_shl(src as u32) as i64;
                                     } else {
                                         (*dst) = (*dst as u64).wrapping_shl(src as u32) as i64;
                                     }
-                                    // TODO: case lsh32-reg-neg.data
-                                    // 0x0000_0011
-                                    // why lsh32 0x11 -4 get 0x10000000
                                 }
                                 OP::Alu(AOp::RSH) => {
                                     if *class == Class::ALU {
@@ -139,87 +120,51 @@ impl Emu {
                                         (*dst) = (*dst as u64).wrapping_shr(src as u32) as i64;
                                     }
                                 }
-                                OP::Alu(AOp::NEG) => {
-                                    (*dst) = dst.overflowing_mul(-1).0;
-                                }
+                                OP::Alu(AOp::NEG) => (*dst) = dst.wrapping_mul(-1),
                                 OP::Alu(AOp::MOD) => {
                                     if src != 0 {
-                                        // case mod64.data
-                                        // why 0xb1858436100dc5c8 % 0xdde263e3cbef7f3 需要转换为u64结果才对
-                                        // (*dst) %= src;
+                                        // mod need unsigned values too
                                         (*dst) = ((*dst as u64) % (src as u64)) as i64;
+                                    } else {
+                                        // mod64-by-zero-reg.data don't want this
+                                        // why not like div?
+                                        // *dst = 0;
                                     }
                                 }
                                 OP::Alu(AOp::XOR) => {
                                     (*dst) ^= src;
                                 }
                                 OP::Alu(AOp::MOV) => {
-                                    if *class == Class::ALU {
-                                        (*dst) = src as u32 as i64;
-                                    } else {
-                                        (*dst) = src;
-                                    }
+                                    (*dst) = src;
                                 }
                                 OP::Alu(AOp::ARSH) => {
-                                    // TODO dst >>= imm (arithmetic)
-                                    // (*dst) >>= src;
-                                    // unsafe { *(dst as *mut u64 as *mut i64) >>= src };
-                                    // dbg!(src as u32);
-                                    // TODO: -16和16是一样？
-                                    // /root/ebpf-emu/bpf_conformance/tests/arsh32-imm-neg.data
-                                    // # %r0 == 0x80000000
-                                    // arsh32 %r0, -16
-
-                                    let sign = if *class == Class::ALU
-                                        && *dst & 0x8000_0000 == 0x8000_0000
-                                    {
+                                    let sign = if *class == Class::ALU && (*dst as i32) < 0 {
                                         -1
-                                    } else if *class == Class::ALU64
-                                        && (*dst as u64) & 0x8000_0000_0000_0000
-                                            == 0x8000_0000_0000_0000
-                                    {
+                                    } else if *class == Class::ALU64 && *dst < 0 {
                                         -1
                                     } else {
                                         1
                                     };
                                     // case: arsh32-imm-high.data
-                                    // WTF: how the shift happend
-                                    // # %r0 == 0x80000000
+                                    // WTF: how the shift happend? the shift wrapping from one side to another
+                                    // # %r0 == 0x8000_0000
                                     // arsh32 %r0, 48
                                     // -- result
                                     // 0xffff8000
-
-                                    // let sign = if *dst <0 {-1} else {1};
-                                    // dbg!(sign);
-                                    // dbg!(&dst, &src);
                                     if *class == Class::ALU {
                                         let mut dst32 = *dst as u32 as i32;
-                                        if src < 0 {
-                                            dst32 = dst32.rotate_left(src.abs() as u32);
-                                        } else {
-                                            dst32 = dst32.rotate_right(src.abs() as u32);
-                                        }
+                                        dst32 = dst32.rotate_right(src as u32);
                                         (*dst) = dst32 as i64 * sign as i64
                                     } else {
-                                        // for ARSH, minus means shift left
-                                        if src < 0 {
-                                            (*dst) = dst.rotate_left(src.abs() as u32);
-                                        } else {
-                                            (*dst) = dst.rotate_right(src.abs() as u32);
-                                        }
+                                        (*dst) = dst.rotate_right(src as u32);
                                         (*dst) = *dst as i64 * sign as i64
                                     }
-                                    // if *class == Class::ALU {
-                                    //     (*dst) = (*dst as i32 * sign) as u32 as i64
-                                    // } else {
-                                    // }
                                 }
-                                // Byteswap instructions class=CLASS_ALU op=BPF_END
-                                // 0xd4 0b1101_0100 (imm=16) le16 dst : dst = htole16(dst)
-                                // 0xd4 0b1101_0100 (imm=32) le32 dst
-                                // 0xdc 0b1101_1100 (imm=16) be16 dst
                                 OP::Alu(AOp::END) => {
-                                    // TODO
+                                    // Byteswap instructions class=CLASS_ALU op=BPF_END
+                                    // 0xd4 0b1101_0100 (imm=16) le16 dst : dst = htole16(dst)
+                                    // 0xd4 0b1101_0100 (imm=32) le32 dst
+                                    // 0xdc 0b1101_1100 (imm=16) be16 dst
                                     match ins.imm {
                                         16 => {
                                             match &source {
@@ -246,19 +191,17 @@ impl Emu {
                                             };
                                         }
                                         64 => {
-                                            // be64 dst: dst = htobe64(dst)
                                             match &source {
                                                 Source::IMM => {
                                                     (*dst) = i64::to_le(*dst as i64) as i64
                                                 }
                                                 Source::SRC => {
-                                                    let tmp = i64::to_be(*dst as i64) as i64;
-                                                    (*dst) = tmp;
+                                                    (*dst) = i64::to_be(*dst as i64) as i64;
                                                 }
                                             };
                                         }
                                         _ => {
-                                            unreachable!("ins.imm {}", ins.imm);
+                                            unreachable!("unsupported BPF_END bits {}", ins.imm);
                                         }
                                     }
                                 }
@@ -277,74 +220,38 @@ impl Emu {
                                 dst = dst as i32 as i64;
                                 src = src as i32 as i64;
                             }
-                            // println!(
-                            //     "{:?} dst({:?}), {:?}({:?}|{:?}), +off({:?})",
-                            //     op, ins.dst, &source, ins.src, ins.imm, ins.off
-                            // );
-                            match &source {
-                                Source::IMM => {
-                                    // println!(
-                                    //     "{:?} {:?}, 0x{:x}, +0x{:x}",
-                                    //     op, ins.dst, ins.imm, ins.off
-                                    // );
-                                }
-                                Source::SRC => {
-                                    // println!(
-                                    //     "{:?} {:?}, {:?}, +0x{:x}",
-                                    //     op, ins.dst, ins.src, ins.off
-                                    // );
-                                }
-                            };
-                            // println!("jmp: {:?}", op);
                             match op {
                                 OP::Jmp(JOp::JA) => {
-                                    // self.pc += off;
                                     self.pc = self.pc.wrapping_add_signed(off);
                                 }
                                 OP::Jmp(JOp::JEQ) => {
-                                    // println!(
-                                    //     "{}: jeq dst({}), imm({}), +off({})",
-                                    //     self.pc, dst, ins.imm, off
-                                    // );
                                     if dst as i64 == src {
-                                        // self.pc += off;
-                                        // self.pc = self.pc.wrapping_add(off);
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
                                 OP::Jmp(JOp::JGT) => {
                                     if dst as i64 > src {
-                                        // self.pc += off;
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
                                 OP::Jmp(JOp::JGE) => {
                                     if dst as i64 >= src {
-                                        // dbg!(self.pc, off);
-                                        // self.pc += off;
                                         // TODO: 到底是用wrapping还是用符号数
-                                        // self.pc = self.pc.wrapping_add(off);
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
                                 OP::Jmp(JOp::JSET) => {
-                                    // TODO
                                     if (dst as i64 & src) != 0 {
-                                        // self.pc += off;
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
                                 OP::Jmp(JOp::JNE) => {
                                     if dst as i64 != src {
-                                        // self.pc += off;
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
                                 OP::Jmp(JOp::JSGT) => {
-                                    // TODO: dst as i64 > imm (signed)
                                     if dst as i64 > src {
-                                        // dbg!(self.pc, off);
-                                        // self.pc += off;
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
@@ -354,17 +261,12 @@ impl Emu {
                                     }
                                 }
                                 OP::Jmp(JOp::CALL) => {
-                                    // todo!();
-                                    // TODO: function call
                                     if source == &Source::IMM {
                                         self.pc = self.pc.wrapping_add_signed(off);
                                         self.fp.push(self.pc + 1);
-                                        // self.pc = ins.imm as u32;
-                                        // self.instructions
                                     } else {
                                         todo!()
                                     }
-                                    // self.state.register[]
                                 }
                                 OP::Jmp(JOp::EXIT) => {
                                     if self.is_xdp {
@@ -388,13 +290,11 @@ impl Emu {
                                 }
                                 OP::Jmp(JOp::JLT) => {
                                     if (dst as i64) < src {
-                                        // self.pc += off;
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
                                 OP::Jmp(JOp::JLE) => {
                                     if dst as i64 <= src {
-                                        // self.pc += off;
                                         self.pc = self.pc.wrapping_add_signed(off);
                                     }
                                 }
@@ -420,29 +320,13 @@ impl Emu {
                 }
                 // Load & Store
                 Code::LS { mode, size, class } => {
-                    let w = match size {
-                        // W
-                        0x00 => 4,
-                        // H
-                        0x08 => 2,
-                        // B
-                        0x10 => 1,
-                        // DW
-                        0x18 => 8,
+                    let (w, size_sign) = match size {
+                        0x00 => (4, "W"),
+                        0x08 => (2, "H"),
+                        0x10 => (1, "B"),
+                        0x18 => (8, "DW"),
                         _ => unreachable!(),
                     };
-                    let size_sign = match size {
-                        // W
-                        0x00 => "W",
-                        // H
-                        0x08 => "H",
-                        // B
-                        0x10 => "B",
-                        // DW
-                        0x18 => "DW",
-                        _ => unreachable!(),
-                    };
-                    // let class = class;
                     let imm = ins.imm64;
                     let mut src = self.state.regs[ins.src as u8 as usize];
                     let mut R0 = self.state.regs[0];
@@ -455,11 +339,6 @@ impl Emu {
                     }
                     match &class {
                         Class::LD | Class::LDX => {
-                            // println!(
-                            //     "{:?}[{}] {:?}, [{:?} +off]",
-                            //     &class, size_sign, &ins.dst, &ins.src
-                            // );
-                            // dst_reg = *(size *) ((imm32 | src_reg) + off)
                             match *mode {
                                 Mode::IMM => {
                                     // panic!("???");
@@ -495,22 +374,9 @@ impl Emu {
                             }
                         }
                         Class::ST | Class::STX => {
-                            // *(size *) (dst_reg + off) = (imm32 | src_reg)
                             let mut source = match &class {
-                                Class::ST => {
-                                    // println!(
-                                    //     "{:?}[{}] [{:?} +off], {:?}",
-                                    //     &class, size_sign, &ins.dst, &ins.imm
-                                    // );
-                                    imm
-                                }
-                                Class::STX => {
-                                    // println!(
-                                    //     "{:?}[{}] [{:?} +off], {:?}",
-                                    //     &class, size_sign, &ins.dst, &ins.src
-                                    // );
-                                    src
-                                }
+                                Class::ST => imm,
+                                Class::STX => src,
                                 _ => unreachable!(),
                             };
                             match *mode {
@@ -526,36 +392,8 @@ impl Emu {
                                             w as _,
                                         )
                                     };
-                                    // match size {
-                                    //     // W u32
-                                    //     0x00 => unsafe {
-                                    //         *(dst as *mut u64 as *mut u32).offset(imm as isize) =
-                                    //             source as u32
-                                    //     },
-                                    //     // H u16
-                                    //     0x08 => unsafe {
-                                    //         *(dst as *mut u64 as *mut u16).offset(imm as isize) =
-                                    //             source as u16
-                                    //     },
-                                    //     // B u8
-                                    //     0x10 => unsafe {
-                                    //         *(dst as *mut u64 as *mut u8).offset(imm as isize) =
-                                    //             source as u8
-                                    //     },
-                                    //     // DW u64
-                                    //     0x18 => unsafe {
-                                    //         // dbg!(123, &dst, imm);
-                                    //         // *(dst as *mut u64 as *mut u64).offset(imm as isize) =
-                                    //         // source as u64
-                                    //     },
-                                    //     _ => unreachable!(),
-                                    // };
                                 }
                                 Mode::ATOMIC => {
-                                    // todo!();
-                                    // STX only
-                                    // atomic operations
-                                    // imm use to encode atomic operations
                                     let mut tmp_dst = self
                                         .state
                                         .mmu
@@ -565,17 +403,15 @@ impl Emu {
                                     if with_fetch {
                                         old_dst = tmp_dst;
                                     }
-                                    // src = src as u32 as i64;
                                     let mut high_dst = 0;
-                                    // dbg!(&size);
                                     if *size == 0 {
                                         src = src as u32 as i64;
                                         high_dst = tmp_dst as u64 >> 32;
-                                        // println!("high_dst: {:x}, tmp_dst: {:x}",high_dst, tmp_dst);
                                         tmp_dst = tmp_dst as u32 as i64;
                                         R0 = R0 as u32 as i64;
                                         old_dst = old_dst as u32 as i64;
                                     }
+                                    // use imm to encode atomic operations
                                     match imm & 0b1111_1110 {
                                         ATOMIC_ADD => {
                                             tmp_dst += src;
@@ -613,7 +449,6 @@ impl Emu {
                                         }
                                     };
                                     tmp_dst = tmp_dst + (high_dst << 32) as i64;
-                                    // dbg!(&tmp_dst, &high_dst);
                                     self.state.mmu.write(
                                         (*dst + ins.off as i64) as usize,
                                         &tmp_dst.to_le_bytes(),
@@ -637,7 +472,6 @@ impl Emu {
             self.ins_count += 1;
             return Some(());
         } else {
-            // println!("=== step to end ===");
             return None;
         }
     }
