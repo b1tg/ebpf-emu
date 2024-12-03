@@ -1,5 +1,5 @@
 use ebpf_emu::emu::Emu;
-use ebpf_emu::ins::{hexs_to_instructions, hexs_to_u8s, u64s_to_instructions, Instruction};
+use ebpf_emu::ins::{hexs_to_instructions, hexs_to_u8s};
 use ebpf_emu::mmu::Mmu;
 use std::io::BufRead;
 fn main() {
